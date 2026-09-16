@@ -1,5 +1,5 @@
 import http from "node:http";
-import worker from "./src/index.js";
+import worker from "./index.js";
 
 const env = { ...process.env };
 
@@ -27,7 +27,6 @@ const server = http.createServer(async (req, res) => {
     res.statusCode = response.status;
     response.headers.forEach((value, key) => res.setHeader(key, value));
     res.end(Buffer.from(await response.arrayBuffer()));
-    // Keep background work alive after the fast VK acknowledgement.
     Promise.allSettled(background).catch(() => {});
   } catch (error) {
     console.error(error);
