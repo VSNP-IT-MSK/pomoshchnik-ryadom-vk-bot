@@ -43,7 +43,7 @@ export default {
     }
 
     if (payload.type === "confirmation") {
-      if (env.VK_CALLBACK_SECRET && payload.secret !== env.VK_CALLBACK_SECRET) return new Response("forbidden", { status: 403 });
+      // VK's confirmation request contains only type and group_id.
       return new Response(env.VK_CONFIRMATION_CODE || "", { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
 
