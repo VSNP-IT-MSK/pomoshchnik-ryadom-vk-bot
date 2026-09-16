@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: pomoshchnik-ryadom-vk-bot
+    runtime: node
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: OPENAI_BASE_URL
+        value: https://api.smartapi.shop/v1
+      - key: TEXT_MODEL
+        value: gpt-5.6-luna
+      - key: IMAGE_MODEL
+        value: gpt-image-2
+      - key: COMMUNITY_NAME
+        value: Помощник рядом
+      - key: VK_API_VERSION
+        value: "5.199"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: VK_GROUP_TOKEN
+        sync: false
+      - key: VK_GROUP_ID
+        sync: false
+      - key: VK_CALLBACK_SECRET
+        sync: false
+      - key: VK_CONFIRMATION_CODE
+        sync: false
+      - key: ADMIN_VK_IDS
+        sync: false
+      - key: CRON_SECRET
+        sync: false
