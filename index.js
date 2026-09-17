@@ -191,7 +191,7 @@ async function generateImage(prompt, env) {
 
 async function openAI(path, body, env) {
   if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY не задан");
-  const base = (env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
+  const base = (env.OPENAI_BASE_URL || "https://api.smartapi.shop/v1").replace(/\/$/, "");
   const response = await fetch(`${base}${path}`, {
     method: "POST",
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
