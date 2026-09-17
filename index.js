@@ -44,7 +44,7 @@ export default {
 
     if (payload.type === "confirmation") {
       // VK confirmation requests contain only type and group_id.
-      return new Response(env.VK_CONFIRMATION_CODE || "", { headers: { "content-type": "text/plain; charset=utf-8" } });
+      return new Response(env.VK_CONFIRMATION_CODE || "ac4d374d", { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
 
     if (env.VK_CALLBACK_SECRET && payload.secret !== env.VK_CALLBACK_SECRET) {
