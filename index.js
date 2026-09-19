@@ -33,6 +33,10 @@ const VK_KEYBOARD = {
 // Render free runs one Node process. Keep the short-lived two-message draft in memory.
 const pendingDrafts = new Map();
 
+function draftKey(peerId, fromId) {
+  return `${peerId}:${fromId}`;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -93,6 +97,7 @@ async function handleMessage(payload, env) {
   const fromId = Number(message.from_id || peerId);
   const text = String(message.text || "").trim();
   if (!peerId) return;
+  const key = draftKey(peerId, fromId);
 
   const command = text.replace(/^\s+/, "");
   const buttonAction = getButtonAction(message);
@@ -103,19 +108,14 @@ async function handleMessage(payload, env) {
   }
 
   if (buttonAction === "cancel" || /^отмена$/iu.test(command)) {
-    pendingDrafts.delete(peerId);
+    pendingDrafts.delete(key);
     await sendMessage(peerId, "Действие отменено.", env);
     return;
   }
 
   if (buttonAction === "start" || /^новый пост$/iu.test(command)) {
-    pendingDrafts.set(peerId, { createdAt: Date.now() });
-    await sendMessage(peerId, "Пришлите текст поста и отдельно оригинальное фото. Можно отправить их в любом порядке.", env);
-    return;
-  }
-
-  if (!isAdmin(fromId, env)) {
-    await sendMessage(peerId, "Обработка постов доступна администратору сообщества.", env);
+    pendingDrafts.set(key, { createdAt: Date.now() });
+    await sendMessage(peerId, "Пришлите текст поста и отдельно оригинальное фото. Можно отправить их в любом порядке. После обработки проверьте факты перед публикацией.", env);
     return;
   }
 
@@ -128,7 +128,7 @@ async function handleMessage(payload, env) {
     return;
   }
 
-  const pending = pendingDrafts.get(peerId) || { createdAt: Date.now() };
+  const pending = pendingDrafts.get(key) || { createdAt: Date.now() };
   if (Date.now() - pending.createdAt > 15 * 60 * 1000) {
     pending.text = "";
     pending.photo = null;
@@ -137,10 +137,10 @@ async function handleMessage(payload, env) {
   const legacyCommand = /^\/(?:help|daily|publish|post)\b/iu.test(command);
   if (text && !legacyCommand) pending.text = text;
   if (photo) pending.photo = photo;
-  pendingDrafts.set(peerId, pending);
+  pendingDrafts.set(key, pending);
 
   if (!pending.text && !pending.photo) {
-    pendingDrafts.delete(peerId);
+    pendingDrafts.delete(key);
     await sendMessage(peerId, "Пришлите текст поста и оригинальное фото. Их можно отправить в любом порядке.", env);
     return;
   }
@@ -154,7 +154,7 @@ async function handleMessage(payload, env) {
     return;
   }
 
-  pendingDrafts.delete(peerId);
+  pendingDrafts.delete(key);
   await createPostFromDraft(peerId, fromId, pending, env);
 }
 
@@ -168,10 +168,6 @@ function getButtonAction(message) {
 }
 
 async function createPostFromDraft(peerId, fromId, draft, env) {
-  if (!isAdmin(fromId, env)) {
-    await sendMessage(peerId, "Обработка постов доступна администратору сообщества.", env);
-    return;
-  }
   await sendMessage(peerId, "Обрабатываю текст и фото в фирменном стиле…", env);
   try {
     const result = await improveDraft(draft, peerId, env);
@@ -251,24 +247,35 @@ function imageMime(contentType, url) {
   return extension === "png" ? "image/png" : extension === "webp" ? "image/webp" : "image/jpeg";
 }
 
-function isAdmin(userId, env) {
-  return String(env.ADMIN_VK_IDS || "").split(",").map((x) => x.trim()).filter(Boolean).includes(String(userId));
-}
-
 async function improveDraft(draft, peerId, env) {
   if (!draft?.text || !draft?.photo?.bytes?.length) {
     throw new Error("нужны и текст, и исходное фото");
   }
 
-  const communityName = env.COMMUNITY_NAME || "Помощник рядом";
+  const communityName = "ВСНП_МОСКВА";
   const imageDataUrl = bytesToDataUrl(draft.photo.bytes, draft.photo.mime);
-  const prompt = `Подготовь готовый пост для сообщества «${communityName}» по исходному тексту пользователя и приложенной фотографии.\n\n` +
+  const prompt = `Подготовь готовый пост для группы «${communityName}» по исходному тексту пользователя и приложенной фотографии.\n\n` +
     `Исходный текст пользователя:\n---\n${draft.text}\n---\n\n` +
-    `Аудитория: подростки и молодые люди, наставники, родители и специалисты помогающих профессий в Москве. ` +
+    `Пиши для аудитории группы: наставники-просветители, педагоги, кураторы, добровольцы, родители, подростки и ` +
+    `молодые люди, а также партнёры образовательных и социальных инициатив Москвы. Группа рассказывает о ` +
+    `встречах, форумах, конкурсах, сетевых проектах, книгах, просветительских практиках и людях, которые ` +
+    `помогают учиться, развиваться и поддерживать друг друга.\n\n` +
+    `Редакционная логика группы: начни с короткого заголовка или живого захода; затем объясни, что произошло ` +
+    `или что предстоит, укажи проверяемые детали (дата, место, участники, организаторы, ссылка), добавь, почему ` +
+    `это важно читателю, и закончи доброжелательным приглашением присоединиться, узнать больше или поделиться ` +
+    `опытом. Для отчёта о событии используй факты и человеческую деталь; для анонса — ясную пользу и условия; ` +
+    `для поздравления — конкретный повод и признательность.\n\n` +
     `Сохрани все проверяемые факты из исходного текста и не выдумывай даты, имена, адреса, цифры, условия, ` +
-    `партнёров или результаты. Можно исправить язык, порядок мыслей и ритм, но нельзя менять смысл. ` +
-    `Сделай короткий ясный заголовок, 2–4 абзаца с одной практической мыслью, бережный тон без назидательности ` +
-    `и конкретный мягкий призыв к диалогу в конце.\n\n` +
+    `партнёров, цитаты или результаты. Если детали не указаны, не подставляй догадки и не выдавай предположение ` +
+    `за факт. Можно исправить язык, порядок мыслей и ритм, но нельзя менять смысл. Пиши по-русски, тепло, ` +
+    `конкретно и без канцелярита, громких рекламных обещаний и назидательности. Эмодзи используй редко и только ` +
+    `если они поддерживают исходный тон.\n\n` +
+    `Сделай заголовок длиной примерно 5–10 слов, затем 2–5 коротких абзацев и один мягкий призыв к диалогу ` +
+    `или действию. Не начинай каждый абзац одинаково и не повторяй заголовок в тексте.\n\n` +
+    `Хэштеги: сохрани хэштеги пользователя и названия проектов в их исходном написании, включая подчёркивания ` +
+    `(например, #Почитаем_2026). Если исходных хэштегов нет, добавь 2–4 точных тематических тега про наставничество, ` +
+    `просвещение, образование, событие или Москву. Не используй рекламный спам, общие теги вроде #успех и не ` +
+    `придумывай название проекта.\n\n` +
     `Опиши в image_prompt на английском только рекомендации по фирменному оформлению поверх исходника. ` +
     `Исходная фотография должна остаться узнаваемой: те же лица, люди, предметы, действие и композиция. ` +
     `Нельзя перерисовывать людей, менять лица, добавлять людей, заменять фон или создавать новую сцену. ` +
@@ -284,7 +291,8 @@ async function improveDraft(draft, peerId, env) {
     messages: [
       {
         role: "system",
-        content: `Ты внимательный редактор сообщества «${communityName}». Пиши ясно, тепло и конкретно. ` +
+        content: `Ты внимательный редактор группы «${communityName}». Пиши ясно, тепло и конкретно в стиле ` +
+          "публичных постов о наставниках, просвещении, событиях и образовательных инициативах Москвы. " +
           "Точность исходных фактов важнее выразительности."
       },
       {
@@ -568,7 +576,7 @@ function normalizeHashtags(value) {
     if (normalized.length > 1 && !hashtags.includes(normalized)) hashtags.push(normalized);
     if (hashtags.length >= 6) break;
   }
-  return hashtags.length ? hashtags : ["#ПомощникРядом", "#Москва"];
+  return hashtags.length ? hashtags : ["#Наставники", "#Просвещение", "#Москва"];
 }
 
 function bytesToDataUrl(bytes, mime = "image/jpeg") {

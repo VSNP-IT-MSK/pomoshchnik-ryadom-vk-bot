@@ -25,5 +25,3 @@ services:
         sync: false
       - key: VK_CONFIRMATION_CODE
         sync: false
-      - key: ADMIN_VK_IDS
-        sync: false
