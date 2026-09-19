@@ -386,13 +386,11 @@ async function uploadMessagePhoto(bytes, peerId, env) {
 
     let uploadResponse;
     try {
+      const multipart = buildPhotoMultipart(bytes, mime, `pomoshchnik-post.${extension}`);
       uploadResponse = await fetchWithRetry(server.upload_url, {
         method: "POST",
-        bodyFactory: () => {
-          const form = new FormData();
-          form.append("photo", new Blob([bytes], { type: mime }), `pomoshchnik-post.${extension}`);
-          return form;
-        }
+        headers: multipart.headers,
+        body: multipart.body
       }, { attempts: 2, timeoutMs: 30000 });
     } catch (error) {
       if (attempt === 0) {
@@ -602,6 +600,25 @@ function detectImageMime(bytes) {
 
 function safeUrlPath(value) {
   try { return new URL(value).pathname; } catch { return "unknown"; }
+}
+
+function buildPhotoMultipart(bytes, mime, filename) {
+  const boundary = `----pomoshchnik-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const header = Buffer.from(
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="photo"; filename="${filename}"\r\n` +
+    `Content-Type: ${mime}\r\n\r\n`,
+    "utf8"
+  );
+  const footer = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+  const body = Buffer.concat([header, Buffer.from(bytes), footer]);
+  return {
+    body,
+    headers: {
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+      "content-length": String(body.length)
+    }
+  };
 }
 
 function formatUploadError(upload) {
