@@ -10,9 +10,7 @@ const BRAND_STYLE = `
 Не добавляй читаемый текст, водяные знаки и чужие логотипы.`.trim();
 
 const BUTTON = Object.freeze({
-  DRAFT: "Создать черновик",
-  PUBLISH: "Опубликовать пост",
-  DAILY: "Пост дня",
+  START: "Новый пост",
   HELP: "Помощь",
   CANCEL: "Отмена"
 });
@@ -21,19 +19,15 @@ const VK_KEYBOARD = {
   one_time: false,
   buttons: [
     [
-      { action: { type: "text", label: BUTTON.DRAFT, payload: JSON.stringify({ action: "draft" }) }, color: "primary" },
-      { action: { type: "text", label: BUTTON.PUBLISH, payload: JSON.stringify({ action: "publish" }) }, color: "positive" }
-    ],
-    [
-      { action: { type: "text", label: BUTTON.DAILY, payload: JSON.stringify({ action: "daily" }) }, color: "secondary" },
+      { action: { type: "text", label: BUTTON.START, payload: JSON.stringify({ action: "start" }) }, color: "primary" },
       { action: { type: "text", label: BUTTON.HELP, payload: JSON.stringify({ action: "help" }) }, color: "secondary" },
       { action: { type: "text", label: BUTTON.CANCEL, payload: JSON.stringify({ action: "cancel" }) }, color: "negative" }
     ]
   ]
 };
 
-// Render free runs one Node process. This short-lived state supports the two-step button flow.
-const pendingTopics = new Map();
+// Render free runs one Node process. Keep the short-lived two-message draft in memory.
+const pendingDrafts = new Map();
 
 export default {
   async fetch(request, env, ctx) {
@@ -48,12 +42,7 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/cron/daily") {
-      if (request.headers.get("authorization") !== `Bearer ${env.CRON_SECRET}`) {
-        return new Response("unauthorized", { status: 401 });
-      }
-      ctx.waitUntil(Promise.resolve(generateAndPublish("Полезная привычка для учёбы и наставничества", env))
-        .catch((error) => console.error("cron/daily failed", error)));
-      return new Response("accepted", { status: 202 });
+      return new Response("automatic publication is disabled; send text and photo to the bot", { status: 410 });
     }
 
     if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
@@ -99,64 +88,70 @@ async function handleMessage(payload, env) {
   const peerId = Number(message.peer_id || message.from_id);
   const fromId = Number(message.from_id || peerId);
   const text = String(message.text || "").trim();
-  if (!peerId || !text) return;
+  if (!peerId) return;
 
   const command = text.replace(/^\s+/, "");
   const buttonAction = getButtonAction(message);
 
   if (buttonAction === "help" || /^(?:\/help|помощь|начать)$/iu.test(command)) {
-    await sendMessage(peerId, "Выберите действие на клавиатуре. Для черновика или публикации бот попросит тему следующим сообщением.", env);
+    await sendMessage(peerId, "Пришлите текст поста и отдельно оригинальное фото. Я улучшу текст, оформлю фото в фирменной стилистике и верну готовый пост сюда.", env);
     return;
   }
 
   if (buttonAction === "cancel" || /^отмена$/iu.test(command)) {
-    pendingTopics.delete(peerId);
+    pendingDrafts.delete(peerId);
     await sendMessage(peerId, "Действие отменено.", env);
     return;
   }
 
-  if (buttonAction === "draft") {
-    await requestTopic(peerId, fromId, "draft", env);
+  if (buttonAction === "start" || /^новый пост$/iu.test(command)) {
+    pendingDrafts.set(peerId, { createdAt: Date.now() });
+    await sendMessage(peerId, "Пришлите текст поста и отдельно оригинальное фото. Можно отправить их в любом порядке.", env);
     return;
   }
 
-  if (buttonAction === "publish") {
-    await requestTopic(peerId, fromId, "publish", env);
+  if (!isAdmin(fromId, env)) {
+    await sendMessage(peerId, "Обработка постов доступна администратору сообщества.", env);
     return;
   }
 
-  if (buttonAction === "daily" || /^\/daily$/iu.test(command)) {
-    if (!isAdmin(fromId, env)) {
-      await sendMessage(peerId, "Публикация доступна только администратору группы.", env);
-      return;
-    }
-    await sendMessage(peerId, "Готовлю пост дня…", env);
-    try {
-      const result = await generateAndPublish("Полезная привычка для учёбы и наставничества", env);
-      await sendMessage(peerId, `Готово: https://vk.com/wall${result.owner_id}_${result.post_id}`, env);
-    } catch (error) {
-      console.error(error);
-      await sendMessage(peerId, `Не удалось опубликовать пост: ${error.message || "ошибка сервиса"}`, env);
-    }
+  let photo;
+  try {
+    photo = await extractPhoto(message);
+  } catch (error) {
+    console.error(error);
+    await sendMessage(peerId, "Не удалось получить фото из сообщения. Пришлите оригинал ещё раз.", env);
     return;
   }
 
-  const pending = pendingTopics.get(peerId);
-  if (pending && Date.now() - pending.createdAt < 10 * 60 * 1000) {
-    pendingTopics.delete(peerId);
-    await createPostForTopic(peerId, fromId, pending.mode, command, env);
+  const pending = pendingDrafts.get(peerId) || { createdAt: Date.now() };
+  if (Date.now() - pending.createdAt > 15 * 60 * 1000) {
+    pending.text = "";
+    pending.photo = null;
+    pending.createdAt = Date.now();
+  }
+  const legacyCommand = /^\/(?:help|daily|publish|post)\b/iu.test(command);
+  if (text && !legacyCommand) pending.text = text;
+  if (photo) pending.photo = photo;
+  pendingDrafts.set(peerId, pending);
+
+  if (!pending.text && !pending.photo) {
+    pendingDrafts.delete(peerId);
+    await sendMessage(peerId, "Пришлите текст поста и оригинальное фото. Их можно отправить в любом порядке.", env);
     return;
   }
-  pendingTopics.delete(peerId);
 
-  // Keep the former commands working for existing administrators during the transition.
-  const postMatch = command.match(/^\/(post|publish)\s+(.{3,300})$/iu);
-  if (postMatch) {
-    await createPostForTopic(peerId, fromId, postMatch[1].toLowerCase() === "publish" ? "publish" : "draft", postMatch[2].trim(), env);
+  if (!pending.text) {
+    await sendMessage(peerId, "Фото принял. Теперь пришлите текст поста отдельным сообщением.", env);
+    return;
+  }
+  if (!pending.photo) {
+    await sendMessage(peerId, "Текст принял. Теперь пришлите оригинальное фото отдельным сообщением.", env);
     return;
   }
 
-  await sendMessage(peerId, "Выберите действие на клавиатуре. Для создания поста бот попросит тему.", env);
+  pendingDrafts.delete(peerId);
+  await createPostFromDraft(peerId, fromId, pending, env);
 }
 
 function getButtonAction(message) {
@@ -168,87 +163,146 @@ function getButtonAction(message) {
   }
 }
 
-async function requestTopic(peerId, fromId, mode, env) {
+async function createPostFromDraft(peerId, fromId, draft, env) {
   if (!isAdmin(fromId, env)) {
-    await sendMessage(peerId, "Создание и публикация доступны только администратору группы.", env);
+    await sendMessage(peerId, "Обработка постов доступна администратору сообщества.", env);
     return;
   }
-  pendingTopics.set(peerId, { mode, createdAt: Date.now() });
-  await sendMessage(peerId, mode === "publish"
-    ? "Напишите тему поста. После генерации бот сразу опубликует результат на стене."
-    : "Напишите тему поста. Я пришлю черновик с изображением в этот чат.", env);
-}
-
-async function createPostForTopic(peerId, fromId, mode, topic, env) {
-  if (!isAdmin(fromId, env)) {
-    await sendMessage(peerId, "Создание и публикация доступны только администратору группы.", env);
-    return;
-  }
-  if (topic.length < 3 || topic.length > 300) {
-    await sendMessage(peerId, "Тема должна содержать от 3 до 300 символов. Нажмите кнопку ещё раз и попробуйте снова.", env);
-    return;
-  }
-  await sendMessage(peerId, "Готовлю текст и визуал в фирменном стиле…", env);
+  await sendMessage(peerId, "Обрабатываю текст и фото в фирменном стиле…", env);
   try {
-    const result = await generatePost(topic, env);
-    if (mode === "publish") {
-      const wall = await publishToWall(result, env);
-      await sendMessage(peerId, `Опубликовано в группе: https://vk.com/wall${wall.owner_id}_${wall.post_id}`, env);
-    } else {
-      await sendMessage(peerId, formatPost(result), env, result.attachment);
-    }
+    const result = await improveDraft(draft, peerId, env);
+    await sendMessage(peerId, formatPost(result), env, result.attachment);
   } catch (error) {
     console.error(error);
-    await sendMessage(peerId, `Не удалось создать пост: ${error.message || "ошибка сервиса"}`, env);
+    await sendMessage(peerId, `Не удалось обработать пост: ${error.message || "ошибка сервиса"}`, env);
   }
+}
+
+const MAX_VISION_IMAGE_BYTES = 6 * 1024 * 1024;
+
+async function extractPhoto(message) {
+  const attachments = normalizeAttachments(message?.attachments);
+  const attachment = attachments.find((item) => item?.type === "photo" && item.photo);
+  if (!attachment) return null;
+
+  const photo = attachment.photo;
+  const candidates = [];
+  const seen = new Set();
+  const addCandidate = (url, width = 0, height = 0) => {
+    if (!url || typeof url !== "string" || seen.has(url)) return;
+    seen.add(url);
+    candidates.push({ url, width: Number(width) || 0, height: Number(height) || 0 });
+  };
+
+  for (const size of Array.isArray(photo.sizes) ? photo.sizes : []) {
+    addCandidate(size?.url, size?.width, size?.height);
+  }
+  if (photo.orig_photo) addCandidate(photo.orig_photo.url, photo.orig_photo.width, photo.orig_photo.height);
+  addCandidate(photo.url, photo.width, photo.height);
+  for (const [key, value] of Object.entries(photo)) {
+    if (/^photo_\d+$/.test(key)) addCandidate(value, Number(key.slice(6)), 0);
+  }
+
+  candidates.sort((a, b) => (b.width * b.height || b.width) - (a.width * a.height || a.width));
+  if (!candidates.length) throw new Error("в сообщении нет доступного URL фотографии");
+
+  let fallback = null;
+  for (const candidate of candidates) {
+    try {
+      const response = await fetch(candidate.url);
+      if (!response.ok) continue;
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (!bytes.length) continue;
+      const mime = imageMime(response.headers.get("content-type"), candidate.url);
+      const result = { bytes, mime, width: candidate.width, height: candidate.height };
+      fallback = result;
+      if (bytes.byteLength <= MAX_VISION_IMAGE_BYTES) return result;
+    } catch {
+      // Try a smaller VK size if the largest URL has expired or is unavailable.
+    }
+  }
+  if (fallback) return fallback;
+  throw new Error("не удалось скачать фотографию из VK");
+}
+
+function normalizeAttachments(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function imageMime(contentType, url) {
+  const fromHeader = String(contentType || "").split(";", 1)[0].trim().toLowerCase();
+  if (fromHeader.startsWith("image/")) return fromHeader;
+  const extension = String(url).split("?", 1)[0].match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+  return extension === "png" ? "image/png" : extension === "webp" ? "image/webp" : "image/jpeg";
 }
 
 function isAdmin(userId, env) {
   return String(env.ADMIN_VK_IDS || "").split(",").map((x) => x.trim()).filter(Boolean).includes(String(userId));
 }
 
-async function generateAndPublish(topic, env) {
-  const result = await generatePost(topic, env);
-  return publishToWall(result, env);
-}
+async function improveDraft(draft, peerId, env) {
+  if (!draft?.text || !draft?.photo?.bytes?.length) {
+    throw new Error("нужны и текст, и исходное фото");
+  }
 
-async function generatePost(topic, env) {
-  const draft = await generateCopy(topic, env);
-  const imageBytes = await generateImage(draft.image_prompt, env);
-  const attachment = await uploadWallPhoto(imageBytes, env);
-  return { ...draft, attachment };
-}
-
-async function generateCopy(topic, env) {
   const communityName = env.COMMUNITY_NAME || "Помощник рядом";
-  const prompt = `Создай пост для сообщества «${communityName}» на тему: ${topic}\n\n` +
-    `Аудитория: подростки, молодые люди, наставники, родители и специалисты помогающих профессий в Москве.\n` +
-    `Сохрани редакционную логику: короткий цепляющий заголовок, 2–4 абзаца с одной практической мыслью, ` +
-    `бережный тон без назидательности, в конце конкретный вопрос или мягкий призыв к диалогу. ` +
-    `Пиши по-русски, без канцелярита и рекламных обещаний.\n\n` +
-    `Ориентир по объёму текста: 900–1300 знаков. Для анонса с условиями допустимо до 1500 знаков. ` +
-    `Структура: короткий заголовок, кому это полезно, суть/условия, конкретный следующий шаг, ` +
-    `снятие одного барьера и финальный CTA. Верни только JSON с полями: title, text, image_prompt, hashtags. ` +
-    `image_prompt должен быть на английском и описывать одну фотореалистичную сцену. ` +
-    `hashtags — массив из 2–4 хэштегов.`;
+  const imageDataUrl = bytesToDataUrl(draft.photo.bytes, draft.photo.mime);
+  const prompt = `Подготовь готовый пост для сообщества «${communityName}» по исходному тексту пользователя и приложенной фотографии.\n\n` +
+    `Исходный текст пользователя:\n---\n${draft.text}\n---\n\n` +
+    `Аудитория: подростки и молодые люди, наставники, родители и специалисты помогающих профессий в Москве. ` +
+    `Сохрани все проверяемые факты из исходного текста и не выдумывай даты, имена, адреса, цифры, условия, ` +
+    `партнёров или результаты. Можно исправить язык, порядок мыслей и ритм, но нельзя менять смысл. ` +
+    `Сделай короткий ясный заголовок, 2–4 абзаца с одной практической мыслью, бережный тон без назидательности ` +
+    `и конкретный мягкий призыв к диалогу в конце.\n\n` +
+    `Проанализируй фотографию и составь image_prompt на английском для фотореалистичной стилизации именно ` +
+    `этого исходника: сохрани узнаваемых людей, важные предметы, действие и общий сюжет, не добавляй ` +
+    `вымышленных людей или событий. Опиши аккуратную редакционную обработку, свет, композицию и свободную ` +
+    `зону под заголовок; не добавляй читаемый текст, водяные знаки или чужие логотипы. Визуальный промпт ` +
+    `должен учитывать фирменную стилистику ниже.\n\n${BRAND_STYLE}\n\n` +
+    `Верни только JSON без markdown-обёртки с полями: title, text, image_prompt, hashtags. ` +
+    `hashtags — массив из 2–4 коротких хэштегов на русском.`;
 
   const data = await openAI("/chat/completions", {
     model: env.TEXT_MODEL || "gpt-5.6-luna",
-    temperature: 0.7,
+    temperature: 0.55,
     messages: [
-      { role: "system", content: `Ты редактор сообщества «${communityName}». Пиши ясно, тепло и конкретно. Не выдумывай факты, даты и цифры. Тон официальный, доброжелательный и мотивирующий, без канцелярита.` },
-      { role: "user", content: prompt }
+      {
+        role: "system",
+        content: `Ты внимательный редактор сообщества «${communityName}». Пиши ясно, тепло и конкретно. ` +
+          "Точность исходных фактов важнее выразительности."
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          { type: "image_url", image_url: { url: imageDataUrl } }
+        ]
+      }
     ]
   }, env);
-  const raw = data.choices?.[0]?.message?.content || "{}";
-  const parsed = parseJson(raw);
-  if (!parsed.title || !parsed.text || !parsed.image_prompt) throw new Error("модель вернула неполный пост");
-  return {
+
+  const raw = messageContentToText(data.choices?.[0]?.message?.content);
+  const parsed = parseJson(raw || "{}");
+  if (!parsed.title || !parsed.text || !parsed.image_prompt) {
+    throw new Error("модель вернула неполный пост");
+  }
+
+  const post = {
     title: String(parsed.title).trim(),
     text: String(parsed.text).trim(),
-    image_prompt: `${parsed.image_prompt}. ${BRAND_STYLE}`,
-    hashtags: Array.isArray(parsed.hashtags) ? parsed.hashtags.map(String).slice(0, 6) : ["#ПомощникРядом", "#Москва"]
+    image_prompt: `${String(parsed.image_prompt).trim()}. ${BRAND_STYLE}`,
+    hashtags: normalizeHashtags(parsed.hashtags)
   };
+  const imageBytes = await generateImage(post.image_prompt, env);
+  post.attachment = await uploadMessagePhoto(imageBytes, peerId, env);
+  return post;
 }
 
 async function generateImage(prompt, env) {
@@ -283,42 +337,36 @@ async function openAI(path, body, env) {
   return data;
 }
 
-async function uploadWallPhoto(bytes, env) {
-  const server = await vk("photos.getWallUploadServer", { group_id: env.VK_GROUP_ID }, env);
+async function uploadMessagePhoto(bytes, peerId, env) {
+  const server = await vk("photos.getMessagesUploadServer", { peer_id: peerId }, env);
   const form = new FormData();
-  form.append("photo", new Blob([bytes], { type: "image/png" }), "vsnp-post.png");
+  const mime = detectImageMime(bytes);
+  const extension = mime === "image/jpeg" ? "jpg" : mime === "image/gif" ? "gif" : "png";
+  form.append("photo", new Blob([bytes], { type: mime }), `pomoshchnik-post.${extension}`);
   const uploadResponse = await fetch(server.upload_url, { method: "POST", body: form });
-  const upload = await uploadResponse.json();
-  if (!upload.photo) throw new Error("VK не принял изображение");
-  const saved = await vk("photos.saveWallPhoto", { group_id: env.VK_GROUP_ID, photo: upload.photo, server: upload.server, hash: upload.hash }, env);
+  const upload = await uploadResponse.json().catch(() => ({}));
+  if (!uploadResponse.ok) throw new Error(upload.error || `VK загрузка изображения ${uploadResponse.status}`);
+  if (!upload.photo) throw new Error("VK не принял изображение для сообщения");
+  const saved = await vk("photos.saveMessagesPhoto", { photo: upload.photo, server: upload.server, hash: upload.hash }, env);
   const photo = saved[0];
-  if (!photo) throw new Error("VK не сохранил изображение");
+  if (!photo) throw new Error("VK не сохранил изображение для сообщения");
   return `photo${photo.owner_id}_${photo.id}`;
 }
 
-async function publishToWall(post, env) {
-  const result = await vk("wall.post", {
-    owner_id: `-${env.VK_GROUP_ID}`,
-    from_group: 1,
-    message: formatPost(post),
-    attachments: post.attachment
-  }, env);
-  return { owner_id: `-${env.VK_GROUP_ID}`, post_id: result.post_id };
-}
-
 async function sendMessage(peerId, message, env, attachment = "") {
-  return vk("messages.send", {
+  const params = {
     peer_id: peerId,
     random_id: Math.floor(Math.random() * 2_000_000_000),
     message,
-    attachment,
     keyboard: JSON.stringify(VK_KEYBOARD)
-  }, env);
+  };
+  if (attachment) params.attachment = attachment;
+  return vk("messages.send", params, env);
 }
 
-async function vk(method, params, env) {
-  if (!env.VK_GROUP_TOKEN) throw new Error("VK_GROUP_TOKEN не задан");
-  const body = new URLSearchParams({ ...params, access_token: env.VK_GROUP_TOKEN, v: env.VK_API_VERSION || "5.199" });
+async function vk(method, params, env, accessToken = env.VK_GROUP_TOKEN) {
+  if (!accessToken) throw new Error("VK-токен не задан");
+  const body = new URLSearchParams({ ...params, access_token: accessToken, v: env.VK_API_VERSION || "5.199" });
   const response = await fetch(`https://api.vk.com/method/${method}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
   const data = await response.json();
   if (data.error) throw new Error(data.error.error_msg || `VK API ${data.error.error_code}`);
@@ -338,6 +386,55 @@ function parseJson(value) {
     if (start >= 0 && end > start) return JSON.parse(cleaned.slice(start, end + 1));
     throw new Error("не удалось разобрать JSON от текстовой модели");
   }
+}
+
+function messageContentToText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (typeof part === "string") return part;
+      return part?.text || part?.content || "";
+    }).join("");
+  }
+  return content?.text || content?.content || "";
+}
+
+function normalizeHashtags(value) {
+  const source = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[\s,]+/)
+      : [];
+  const hashtags = [];
+  for (const item of source) {
+    const tag = String(item || "").trim().replace(/^#+/, "");
+    if (!tag) continue;
+    const normalized = `#${tag.replace(/[^\p{L}\p{N}_-]/gu, "")}`;
+    if (normalized.length > 1 && !hashtags.includes(normalized)) hashtags.push(normalized);
+    if (hashtags.length >= 6) break;
+  }
+  return hashtags.length ? hashtags : ["#ПомощникРядом", "#Москва"];
+}
+
+function bytesToDataUrl(bytes, mime = "image/jpeg") {
+  return `data:${imageMime(mime, "")};base64,${bytesToBase64(bytes)}`;
+}
+
+function bytesToBase64(bytes) {
+  if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("base64");
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function detectImageMime(bytes) {
+  if (bytes?.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+  if (bytes?.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes?.length >= 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return "image/gif";
+  return "image/png";
 }
 
 function base64ToBytes(base64) {
