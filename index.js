@@ -1,4 +1,8 @@
+import { fileURLToPath } from "node:url";
+import sharp from "sharp";
+
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
+const BRAND_LOGO_PATH = fileURLToPath(new URL("./assets/brand-logo.png", import.meta.url));
 
 const BRAND_STYLE = `
 Фирменная стилистика ВСНП Москва: палитра #B88FFF (лавандовый), #7F74D8 (фиолетовый),
@@ -174,7 +178,7 @@ async function createPostFromDraft(peerId, fromId, draft, env) {
     await sendMessage(peerId, formatPost(result), env, result.attachment);
   } catch (error) {
     console.error(error);
-    await sendMessage(peerId, `Не удалось обработать пост: ${error.message || "ошибка сервиса"}`, env);
+    await sendMessage(peerId, `Не удалось обработать пост: ${userFacingError(error)}`, env);
   }
 }
 
@@ -209,7 +213,11 @@ async function extractPhoto(message) {
   let fallback = null;
   for (const candidate of candidates) {
     try {
-      const response = await fetch(candidate.url);
+      const response = await fetchWithRetry(candidate.url, {}, {
+        attempts: 2,
+        timeoutMs: 20000,
+        logRetries: false
+      });
       if (!response.ok) continue;
       const bytes = new Uint8Array(await response.arrayBuffer());
       if (!bytes.length) continue;
@@ -261,11 +269,12 @@ async function improveDraft(draft, peerId, env) {
     `партнёров или результаты. Можно исправить язык, порядок мыслей и ритм, но нельзя менять смысл. ` +
     `Сделай короткий ясный заголовок, 2–4 абзаца с одной практической мыслью, бережный тон без назидательности ` +
     `и конкретный мягкий призыв к диалогу в конце.\n\n` +
-    `Проанализируй фотографию и составь image_prompt на английском для фотореалистичной стилизации именно ` +
-    `этого исходника: сохрани узнаваемых людей, важные предметы, действие и общий сюжет, не добавляй ` +
-    `вымышленных людей или событий. Опиши аккуратную редакционную обработку, свет, композицию и свободную ` +
-    `зону под заголовок; не добавляй читаемый текст, водяные знаки или чужие логотипы. Визуальный промпт ` +
-    `должен учитывать фирменную стилистику ниже.\n\n${BRAND_STYLE}\n\n` +
+    `Опиши в image_prompt на английском только рекомендации по фирменному оформлению поверх исходника. ` +
+    `Исходная фотография должна остаться узнаваемой: те же лица, люди, предметы, действие и композиция. ` +
+    `Нельзя перерисовывать людей, менять лица, добавлять людей, заменять фон или создавать новую сцену. ` +
+    `Фактическую обработку выполнит слой брендинга: логотип, аккуратные текучие волны, четыре тонких ` +
+    `конца звезды и цветовые акценты. Не добавляй читаемый текст, кроме предоставленного логотипа. ` +
+    `Учитывай фирменную стилистику ниже.\n\n${BRAND_STYLE}\n\n` +
     `Верни только JSON без markdown-обёртки с полями: title, text, image_prompt, hashtags. ` +
     `hashtags — массив из 2–4 коротких хэштегов на русском.`;
 
@@ -300,38 +309,53 @@ async function improveDraft(draft, peerId, env) {
     image_prompt: `${String(parsed.image_prompt).trim()}. ${BRAND_STYLE}`,
     hashtags: normalizeHashtags(parsed.hashtags)
   };
-  const imageBytes = await generateImage(post.image_prompt, env);
+  const imageBytes = await applyBrandDesign(draft.photo.bytes);
   post.attachment = await uploadMessagePhoto(imageBytes, peerId, env);
   return post;
 }
 
-async function generateImage(prompt, env) {
-  const data = await openAI("/images/generations", {
-    model: env.IMAGE_MODEL || "gpt-image-2",
-    prompt,
-    size: "1024x1024",
-    quality: "auto",
-    response_format: "b64_json"
-  }, env);
-  const item = data.data?.[0];
-  if (!item) throw new Error("модель изображения не вернула файл");
-  if (item.b64_json) return base64ToBytes(item.b64_json);
-  if (item.url) {
-    const response = await fetch(item.url);
-    if (!response.ok) throw new Error(`не удалось скачать изображение (${response.status})`);
-    return new Uint8Array(await response.arrayBuffer());
-  }
-  throw new Error("неизвестный формат изображения");
+async function applyBrandDesign(bytes) {
+  const base = await sharp(bytes, { failOn: "none" })
+    .rotate()
+    .resize({ width: 1600, height: 1600, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 94, chromaSubsampling: "4:4:4" })
+    .toBuffer();
+  const metadata = await sharp(base).metadata();
+  const width = metadata.width || 1600;
+  const height = metadata.height || 1600;
+  const margin = Math.max(18, Math.round(width * 0.025));
+  const logoWidth = Math.max(120, Math.round(width * 0.2));
+  const logo = await sharp(BRAND_LOGO_PATH)
+    .resize({ width: logoWidth, fit: "inside", withoutEnlargement: false })
+    .png()
+    .toBuffer();
+  const waveHeight = Math.round(height * 0.16);
+  const stroke = Math.max(4, Math.round(width * 0.006));
+  const overlay = Buffer.from(`<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+    <path d="M0 ${height - waveHeight * 0.72} C ${width * 0.2} ${height - waveHeight * 1.2}, ${width * 0.36} ${height - waveHeight * 0.05}, ${width * 0.58} ${height - waveHeight * 0.62} S ${width * 0.86} ${height - waveHeight * 1.05}, ${width} ${height - waveHeight * 0.48} L ${width} ${height} L 0 ${height} Z" fill="#0C4746" fill-opacity="0.72"/>
+    <path d="M0 ${height - waveHeight * 0.3} C ${width * 0.2} ${height - waveHeight * 0.75}, ${width * 0.4} ${height + waveHeight * 0.05}, ${width * 0.63} ${height - waveHeight * 0.28} S ${width * 0.86} ${height - waveHeight * 0.7}, ${width} ${height - waveHeight * 0.18}" fill="none" stroke="#B88FFF" stroke-width="${stroke}" stroke-linecap="round" opacity="0.95"/>
+    <path d="M0 ${height - waveHeight * 0.08} C ${width * 0.24} ${height - waveHeight * 0.38}, ${width * 0.47} ${height + waveHeight * 0.08}, ${width * 0.75} ${height - waveHeight * 0.12} S ${width * 0.9} ${height - waveHeight * 0.34}, ${width} ${height - waveHeight * 0.1}" fill="none" stroke="#FFD21F" stroke-width="${Math.max(3, Math.round(stroke * 0.65))}" stroke-linecap="round" opacity="0.96"/>
+    <rect x="${margin - 8}" y="${margin - 8}" width="${logoWidth + 16}" height="${Math.round(logoWidth * 0.82) + 16}" rx="${Math.round(margin * 0.7)}" fill="#FFFFFF" fill-opacity="0.78"/>
+    <path d="M${width - margin * 2.5} ${margin * 1.2} C ${width - margin * 1.5} ${margin * 0.2}, ${width - margin * 0.5} ${margin * 1.9}, ${width - margin * 0.4} ${margin * 0.7}" fill="none" stroke="#7F74D8" stroke-width="${stroke}" stroke-linecap="round" opacity="0.9"/>
+    <path d="M${width - margin * 1.7} ${margin * 1.15} C ${width - margin * 1.2} ${margin * 0.55}, ${width - margin * 0.7} ${margin * 1.35}, ${width - margin * 0.2} ${margin * 0.95}" fill="none" stroke="#FFD21F" stroke-width="${Math.max(3, Math.round(stroke * 0.7))}" stroke-linecap="round" opacity="0.95"/>
+  </svg>`);
+  return sharp(base)
+    .composite([
+      { input: overlay, left: 0, top: 0 },
+      { input: logo, left: margin, top: margin }
+    ])
+    .jpeg({ quality: 92, chromaSubsampling: "4:4:4" })
+    .toBuffer();
 }
 
 async function openAI(path, body, env) {
   if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY не задан");
   const base = (env.OPENAI_BASE_URL || "https://api.smartapi.shop/v1").replace(/\/$/, "");
-  const response = await fetch(`${base}${path}`, {
+  const response = await fetchWithRetry(`${base}${path}`, {
     method: "POST",
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify(body)
-  });
+  }, { attempts: 2, timeoutMs: 120000 });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error?.message || `AI API ${response.status}`);
   return data;
@@ -357,9 +381,23 @@ async function uploadMessagePhoto(bytes, peerId, env) {
       throw new Error("VK не вернул URL сервера загрузки изображения");
     }
 
-    const form = new FormData();
-    form.append("photo", new Blob([bytes], { type: mime }), `pomoshchnik-post.${extension}`);
-    const uploadResponse = await fetch(server.upload_url, { method: "POST", body: form });
+    let uploadResponse;
+    try {
+      uploadResponse = await fetchWithRetry(server.upload_url, {
+        method: "POST",
+        bodyFactory: () => {
+          const form = new FormData();
+          form.append("photo", new Blob([bytes], { type: mime }), `pomoshchnik-post.${extension}`);
+          return form;
+        }
+      }, { attempts: 2, timeoutMs: 30000 });
+    } catch (error) {
+      if (attempt === 0) {
+        console.warn("VK photo upload network retry", { code: error?.code || error?.cause?.code || error?.name });
+        continue;
+      }
+      throw error;
+    }
     const uploadText = await uploadResponse.text();
     let upload = {};
     try {
@@ -412,10 +450,82 @@ async function sendMessage(peerId, message, env, attachment = "") {
 async function vk(method, params, env, accessToken = env.VK_GROUP_TOKEN) {
   if (!accessToken) throw new Error("VK-токен не задан");
   const body = new URLSearchParams({ ...params, access_token: accessToken, v: env.VK_API_VERSION || "5.199" });
-  const response = await fetch(`https://api.vk.com/method/${method}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
-  const data = await response.json();
+  const response = await fetchWithRetry(`https://api.vk.com/method/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body
+  }, { attempts: 3, timeoutMs: 20000 });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`VK HTTP ${response.status}`);
   if (data.error) throw new Error(data.error.error_msg || `VK API ${data.error.error_code}`);
   return data.response;
+}
+
+async function fetchWithRetry(url, init = {}, options = {}) {
+  const attempts = Math.max(1, Number(options.attempts) || 1);
+  const timeoutMs = Math.max(1000, Number(options.timeoutMs) || 30000);
+  const bodyFactory = init.bodyFactory;
+  const requestInit = { ...init };
+  delete requestInit.bodyFactory;
+  const targets = retryTargets(url);
+  let lastError;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const target = targets[attempt % targets.length];
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(target, {
+        ...requestInit,
+        body: bodyFactory ? bodyFactory() : requestInit.body,
+        signal: controller.signal
+      });
+      if (!isRetryableStatus(response.status) || attempt === attempts - 1) return response;
+      lastError = new Error(`HTTP ${response.status}`);
+      if (options.logRetries !== false) console.warn("network request retry", { host: new URL(target).hostname, status: response.status });
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableError(error) || attempt === attempts - 1) throw error;
+      if (options.logRetries !== false) console.warn("network request retry", {
+        host: new URL(target).hostname,
+        code: error?.code || error?.cause?.code || error?.name
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(1200, 250 * (attempt + 1))));
+  }
+  throw lastError || new Error("сетевой запрос не выполнен");
+}
+
+function retryTargets(value) {
+  const url = new URL(value);
+  if (url.hostname === "api.vk.com" || url.hostname === "api.vk.ru") {
+    const hosts = [url.hostname, url.hostname === "api.vk.com" ? "api.vk.ru" : "api.vk.com"];
+    return hosts.map((host) => {
+      const copy = new URL(url);
+      copy.hostname = host;
+      return copy.toString();
+    });
+  }
+  return [url.toString()];
+}
+
+function isRetryableStatus(status) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function isRetryableError(error) {
+  const code = error?.code || error?.cause?.code;
+  return error?.name === "AbortError" || error?.name === "TypeError" || String(code || "").startsWith("UND_ERR");
+}
+
+function userFacingError(error) {
+  const code = error?.code || error?.cause?.code;
+  if (error?.name === "AbortError" || code === "UND_ERR_CONNECT_TIMEOUT" || code === "UND_ERR_HEADERS_TIMEOUT") {
+    return "внешний сервис не ответил вовремя. Попробуйте ещё раз через минуту";
+  }
+  return error?.message || "ошибка сервиса";
 }
 
 function formatPost(post) {
