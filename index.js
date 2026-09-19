@@ -51,7 +51,8 @@ export default {
       if (request.headers.get("authorization") !== `Bearer ${env.CRON_SECRET}`) {
         return new Response("unauthorized", { status: 401 });
       }
-      ctx.waitUntil(generateAndPublish("Полезная привычка для учёбы и наставничества", env));
+      ctx.waitUntil(Promise.resolve(generateAndPublish("Полезная привычка для учёбы и наставничества", env))
+        .catch((error) => console.error("cron/daily failed", error)));
       return new Response("accepted", { status: 202 });
     }
 
@@ -85,7 +86,8 @@ export default {
     }
 
     if (payload.type === "message_new") {
-      ctx.waitUntil(handleMessage(payload, env));
+      ctx.waitUntil(Promise.resolve(handleMessage(payload, env))
+        .catch((error) => console.error("message_new failed", error)));
     }
 
     return new Response("ok", { headers: { "content-type": "text/plain; charset=utf-8" } });
