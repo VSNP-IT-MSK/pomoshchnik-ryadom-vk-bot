@@ -338,19 +338,64 @@ async function openAI(path, body, env) {
 }
 
 async function uploadMessagePhoto(bytes, peerId, env) {
-  const server = await vk("photos.getMessagesUploadServer", { peer_id: peerId }, env);
-  const form = new FormData();
   const mime = detectImageMime(bytes);
+  if (mime === "image/webp") {
+    throw new Error("VK принимает PNG, JPEG или GIF; сервис изображений вернул WebP");
+  }
+  if (!["image/png", "image/jpeg", "image/gif"].includes(mime)) {
+    throw new Error(`неподдерживаемый формат изображения: ${mime}`);
+  }
   const extension = mime === "image/jpeg" ? "jpg" : mime === "image/gif" ? "gif" : "png";
-  form.append("photo", new Blob([bytes], { type: mime }), `pomoshchnik-post.${extension}`);
-  const uploadResponse = await fetch(server.upload_url, { method: "POST", body: form });
-  const upload = await uploadResponse.json().catch(() => ({}));
-  if (!uploadResponse.ok) throw new Error(upload.error || `VK загрузка изображения ${uploadResponse.status}`);
-  if (!upload.photo) throw new Error("VK не принял изображение для сообщения");
-  const saved = await vk("photos.saveMessagesPhoto", { photo: upload.photo, server: upload.server, hash: upload.hash }, env);
-  const photo = saved[0];
-  if (!photo) throw new Error("VK не сохранил изображение для сообщения");
-  return `photo${photo.owner_id}_${photo.id}`;
+  let lastUpload = null;
+
+  // VK has occasionally returned a transient v2/bulk_upload response instead of
+  // the documented { photo, server, hash } payload. Refresh the upload server
+  // once, then fail with enough context to diagnose a persistent rollout issue.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const server = await vk("photos.getMessagesUploadServer", { peer_id: peerId }, env);
+    if (!server?.upload_url) {
+      throw new Error("VK не вернул URL сервера загрузки изображения");
+    }
+
+    const form = new FormData();
+    form.append("photo", new Blob([bytes], { type: mime }), `pomoshchnik-post.${extension}`);
+    const uploadResponse = await fetch(server.upload_url, { method: "POST", body: form });
+    const uploadText = await uploadResponse.text();
+    let upload = {};
+    try {
+      upload = uploadText ? JSON.parse(uploadText) : {};
+    } catch {
+      upload = { _raw: uploadText.slice(0, 200) };
+    }
+    lastUpload = { upload, uploadUrl: server.upload_url, status: uploadResponse.status };
+
+    if (!uploadResponse.ok) {
+      throw new Error(`VK загрузка изображения ${uploadResponse.status}: ${formatUploadError(upload)}`);
+    }
+    if (upload.photo) {
+      const saved = await vk("photos.saveMessagesPhoto", {
+        photo: upload.photo,
+        server: upload.server,
+        hash: upload.hash
+      }, env);
+      const photo = saved?.[0];
+      if (!photo) throw new Error("VK не сохранил изображение для сообщения");
+      const accessKey = photo.access_key ? `_${photo.access_key}` : "";
+      return `photo${photo.owner_id}_${photo.id}${accessKey}`;
+    }
+
+    const isBulkUpload = /\/v2\/bulk_upload(?:[/?]|$)/i.test(String(server.upload_url)) || upload.files;
+    if (isBulkUpload && attempt === 0) {
+      console.warn("VK returned a bulk upload response; refreshing the message upload server", {
+        path: safeUrlPath(server.upload_url),
+        keys: Object.keys(upload).filter((key) => key !== "_raw")
+      });
+      continue;
+    }
+    break;
+  }
+
+  throw new Error(`VK не вернул поле photo для сообщения (${describeUploadResponse(lastUpload)})`);
 }
 
 async function sendMessage(peerId, message, env, attachment = "") {
@@ -434,7 +479,32 @@ function detectImageMime(bytes) {
   if (bytes?.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
   if (bytes?.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
   if (bytes?.length >= 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return "image/gif";
+  if (bytes?.length >= 12
+    && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+    && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return "image/webp";
   return "image/png";
+}
+
+function safeUrlPath(value) {
+  try { return new URL(value).pathname; } catch { return "unknown"; }
+}
+
+function formatUploadError(upload) {
+  const error = upload?.error;
+  if (typeof error === "string" && error) return error;
+  if (error?.message) return String(error.message);
+  if (error?.error_msg) return String(error.error_msg);
+  if (upload?._raw) return "сервер вернул не-JSON ответ";
+  return "неизвестный ответ сервера загрузки";
+}
+
+function describeUploadResponse(result) {
+  if (!result) return "ответ отсутствует";
+  const keys = Object.keys(result.upload || {}).filter((key) => key !== "_raw");
+  const endpoint = safeUrlPath(result.uploadUrl);
+  const suffix = keys.length ? `поля: ${keys.join(", ")}` : "поля отсутствуют";
+  const status = result.status ? `HTTP ${result.status}, ` : "";
+  return `${status}endpoint ${endpoint}, ${suffix}`;
 }
 
 function base64ToBytes(base64) {
