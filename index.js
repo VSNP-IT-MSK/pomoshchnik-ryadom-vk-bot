@@ -408,16 +408,18 @@ async function uploadMessagePhoto(bytes, peerId, env) {
     } catch {
       upload = { _raw: uploadText.slice(0, 200) };
     }
-    lastUpload = { upload, uploadUrl: server.upload_url, status: uploadResponse.status };
+    const normalizedUpload = unwrapUploadResponse(upload);
+    lastUpload = { upload: normalizedUpload, uploadUrl: server.upload_url, status: uploadResponse.status };
 
     if (!uploadResponse.ok) {
-      throw new Error(`VK загрузка изображения ${uploadResponse.status}: ${formatUploadError(upload)}`);
+      throw new Error(`VK загрузка изображения ${uploadResponse.status}: ${formatUploadError(normalizedUpload)}`);
     }
-    if (upload.photo) {
+    const photoPayload = normalizeUploadPhoto(normalizedUpload.photo);
+    if (photoPayload) {
       const saved = await vk("photos.saveMessagesPhoto", {
-        photo: upload.photo,
-        server: upload.server,
-        hash: upload.hash
+        photo: photoPayload,
+        server: normalizedUpload.server,
+        hash: normalizedUpload.hash
       }, env);
       const photo = saved?.[0];
       if (!photo) throw new Error("VK не сохранил изображение для сообщения");
@@ -425,11 +427,11 @@ async function uploadMessagePhoto(bytes, peerId, env) {
       return `photo${photo.owner_id}_${photo.id}${accessKey}`;
     }
 
-    const isBulkUpload = /\/v2\/bulk_upload(?:[/?]|$)/i.test(String(server.upload_url)) || upload.files;
+    const isBulkUpload = /\/v2\/bulk_upload(?:[/?]|$)/i.test(String(server.upload_url)) || normalizedUpload.files;
     if (isBulkUpload && attempt === 0) {
       console.warn("VK returned a bulk upload response; refreshing the message upload server", {
         path: safeUrlPath(server.upload_url),
-        keys: Object.keys(upload).filter((key) => key !== "_raw")
+        keys: Object.keys(normalizedUpload).filter((key) => key !== "_raw")
       });
       continue;
     }
@@ -609,6 +611,20 @@ function formatUploadError(upload) {
   if (error?.error_msg) return String(error.error_msg);
   if (upload?._raw) return "сервер вернул не-JSON ответ";
   return "неизвестный ответ сервера загрузки";
+}
+
+function unwrapUploadResponse(upload) {
+  if (upload?.response && typeof upload.response === "object" && !Array.isArray(upload.response)) {
+    return upload.response;
+  }
+  return upload || {};
+}
+
+function normalizeUploadPhoto(value) {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try { return JSON.stringify(value); } catch { return ""; }
 }
 
 function describeUploadResponse(result) {
