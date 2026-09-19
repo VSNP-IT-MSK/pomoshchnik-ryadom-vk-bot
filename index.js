@@ -9,6 +9,32 @@ const BRAND_STYLE = `
 поддержки и роста. Оставляй свободную область сверху или слева для заголовка.
 Не добавляй читаемый текст, водяные знаки и чужие логотипы.`.trim();
 
+const BUTTON = Object.freeze({
+  DRAFT: "Создать черновик",
+  PUBLISH: "Опубликовать пост",
+  DAILY: "Пост дня",
+  HELP: "Помощь",
+  CANCEL: "Отмена"
+});
+
+const VK_KEYBOARD = {
+  one_time: false,
+  buttons: [
+    [
+      { action: { type: "text", label: BUTTON.DRAFT, payload: JSON.stringify({ action: "draft" }) }, color: "primary" },
+      { action: { type: "text", label: BUTTON.PUBLISH, payload: JSON.stringify({ action: "publish" }) }, color: "positive" }
+    ],
+    [
+      { action: { type: "text", label: BUTTON.DAILY, payload: JSON.stringify({ action: "daily" }) }, color: "secondary" },
+      { action: { type: "text", label: BUTTON.HELP, payload: JSON.stringify({ action: "help" }) }, color: "secondary" },
+      { action: { type: "text", label: BUTTON.CANCEL, payload: JSON.stringify({ action: "cancel" }) }, color: "negative" }
+    ]
+  ]
+};
+
+// Render free runs one Node process. This short-lived state supports the two-step button flow.
+const pendingTopics = new Map();
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -44,8 +70,7 @@ export default {
 
     if (payload.type === "confirmation") {
       // VK's confirmation request contains only type and group_id.
-      // Keep the current VK code as a fallback when Render has not populated the env var yet.
-      return new Response(env.VK_CONFIRMATION_CODE || "ac4d374d", { headers: { "content-type": "text/plain; charset=utf-8" } });
+      return new Response(env.VK_CONFIRMATION_CODE || "", { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
 
     if (env.VK_CALLBACK_SECRET && payload.secret !== env.VK_CALLBACK_SECRET) {
@@ -75,38 +100,32 @@ async function handleMessage(payload, env) {
   if (!peerId || !text) return;
 
   const command = text.replace(/^\s+/, "");
-  if (/^(?:\/help|помощь|начать)$/iu.test(command)) {
-    await sendMessage(peerId, "Команды:\n/post тема — создать черновик поста и изображения\n/publish тема — создать и опубликовать (только администратору)\n/daily — опубликовать пост дня (только администратору)", env);
+  const buttonAction = getButtonAction(message);
+
+  if (buttonAction === "help" || /^(?:\/help|помощь|начать)$/iu.test(command)) {
+    await sendMessage(peerId, "Выберите действие на клавиатуре. Для черновика или публикации бот попросит тему следующим сообщением.", env);
     return;
   }
 
-  const postMatch = command.match(/^\/(post|publish)\s+(.{3,300})$/iu);
-  if (postMatch) {
-    const mode = postMatch[1].toLowerCase();
-    const topic = postMatch[2].trim();
-    if (!isAdmin(fromId, env)) {
-      await sendMessage(peerId, "Команды создания и публикации доступны только администратору группы.", env);
-      return;
-    }
-    await sendMessage(peerId, "Готовлю текст и визуал в фирменном стиле…", env);
-    try {
-      const result = await generatePost(topic, env);
-      if (mode === "publish") {
-        const wall = await publishToWall(result, env);
-        await sendMessage(peerId, `Опубликовано в группе: https://vk.com/wall${wall.owner_id}_${wall.post_id}`, env);
-      } else {
-        await sendMessage(peerId, formatPost(result), env, result.attachment);
-      }
-    } catch (error) {
-      console.error(error);
-      await sendMessage(peerId, `Не удалось создать пост: ${error.message || "ошибка сервиса"}`, env);
-    }
+  if (buttonAction === "cancel" || /^отмена$/iu.test(command)) {
+    pendingTopics.delete(peerId);
+    await sendMessage(peerId, "Действие отменено.", env);
     return;
   }
 
-  if (/^\/daily$/iu.test(command)) {
+  if (buttonAction === "draft") {
+    await requestTopic(peerId, fromId, "draft", env);
+    return;
+  }
+
+  if (buttonAction === "publish") {
+    await requestTopic(peerId, fromId, "publish", env);
+    return;
+  }
+
+  if (buttonAction === "daily" || /^\/daily$/iu.test(command)) {
     if (!isAdmin(fromId, env)) {
-      await sendMessage(peerId, "Команда публикации доступна только администратору группы.", env);
+      await sendMessage(peerId, "Публикация доступна только администратору группы.", env);
       return;
     }
     await sendMessage(peerId, "Готовлю пост дня…", env);
@@ -120,7 +139,66 @@ async function handleMessage(payload, env) {
     return;
   }
 
-  await sendMessage(peerId, "Напишите /help, чтобы увидеть команды. Например: /post как поддержать подростка перед экзаменом", env);
+  const pending = pendingTopics.get(peerId);
+  if (pending && Date.now() - pending.createdAt < 10 * 60 * 1000) {
+    pendingTopics.delete(peerId);
+    await createPostForTopic(peerId, fromId, pending.mode, command, env);
+    return;
+  }
+  pendingTopics.delete(peerId);
+
+  // Keep the former commands working for existing administrators during the transition.
+  const postMatch = command.match(/^\/(post|publish)\s+(.{3,300})$/iu);
+  if (postMatch) {
+    await createPostForTopic(peerId, fromId, postMatch[1].toLowerCase() === "publish" ? "publish" : "draft", postMatch[2].trim(), env);
+    return;
+  }
+
+  await sendMessage(peerId, "Выберите действие на клавиатуре. Для создания поста бот попросит тему.", env);
+}
+
+function getButtonAction(message) {
+  try {
+    const payload = typeof message.payload === "string" ? JSON.parse(message.payload) : message.payload;
+    return payload?.action || null;
+  } catch {
+    return null;
+  }
+}
+
+async function requestTopic(peerId, fromId, mode, env) {
+  if (!isAdmin(fromId, env)) {
+    await sendMessage(peerId, "Создание и публикация доступны только администратору группы.", env);
+    return;
+  }
+  pendingTopics.set(peerId, { mode, createdAt: Date.now() });
+  await sendMessage(peerId, mode === "publish"
+    ? "Напишите тему поста. После генерации бот сразу опубликует результат на стене."
+    : "Напишите тему поста. Я пришлю черновик с изображением в этот чат.", env);
+}
+
+async function createPostForTopic(peerId, fromId, mode, topic, env) {
+  if (!isAdmin(fromId, env)) {
+    await sendMessage(peerId, "Создание и публикация доступны только администратору группы.", env);
+    return;
+  }
+  if (topic.length < 3 || topic.length > 300) {
+    await sendMessage(peerId, "Тема должна содержать от 3 до 300 символов. Нажмите кнопку ещё раз и попробуйте снова.", env);
+    return;
+  }
+  await sendMessage(peerId, "Готовлю текст и визуал в фирменном стиле…", env);
+  try {
+    const result = await generatePost(topic, env);
+    if (mode === "publish") {
+      const wall = await publishToWall(result, env);
+      await sendMessage(peerId, `Опубликовано в группе: https://vk.com/wall${wall.owner_id}_${wall.post_id}`, env);
+    } else {
+      await sendMessage(peerId, formatPost(result), env, result.attachment);
+    }
+  } catch (error) {
+    console.error(error);
+    await sendMessage(peerId, `Не удалось создать пост: ${error.message || "ошибка сервиса"}`, env);
+  }
 }
 
 function isAdmin(userId, env) {
@@ -192,7 +270,7 @@ async function generateImage(prompt, env) {
 
 async function openAI(path, body, env) {
   if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY не задан");
-  const base = (env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
+  const base = (env.OPENAI_BASE_URL || "https://api.smartapi.shop/v1").replace(/\/$/, "");
   const response = await fetch(`${base}${path}`, {
     method: "POST",
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
@@ -227,7 +305,13 @@ async function publishToWall(post, env) {
 }
 
 async function sendMessage(peerId, message, env, attachment = "") {
-  return vk("messages.send", { peer_id: peerId, random_id: Math.floor(Math.random() * 2_000_000_000), message, attachment }, env);
+  return vk("messages.send", {
+    peer_id: peerId,
+    random_id: Math.floor(Math.random() * 2_000_000_000),
+    message,
+    attachment,
+    keyboard: JSON.stringify(VK_KEYBOARD)
+  }, env);
 }
 
 async function vk(method, params, env) {
