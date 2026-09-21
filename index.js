@@ -115,11 +115,11 @@ function normalizeMaxUpdate(update) {
   const sender = source.sender || callback.user || {};
   const recipient = source.recipient || {};
   const chatId = recipient.chat_id ?? source.chat_id ?? callback.chat_id ?? update.chat_id;
-  const userId = recipient.user_id ?? source.user_id ?? callback.user?.user_id ?? callback.user_id;
+  const senderUserId = sender.user_id ?? callback.user?.user_id ?? callback.user_id ?? source.user_id ?? update.user_id;
   const peerId = chatId !== undefined && chatId !== null
     ? `chat:${chatId}`
-    : userId !== undefined && userId !== null
-      ? `user:${userId}`
+    : senderUserId !== undefined && senderUserId !== null
+      ? `user:${senderUserId}`
       : "";
   if (!peerId) return null;
 
@@ -128,7 +128,7 @@ function normalizeMaxUpdate(update) {
   return {
     message: {
       peer_id: peerId,
-      from_id: sender.user_id ?? callback.user?.user_id ?? userId ?? peerId,
+      from_id: senderUserId || peerId,
       text: String(body.text ?? source.text ?? "").trim(),
       payload: callbackPayload,
       attachments
