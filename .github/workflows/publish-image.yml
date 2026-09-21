@@ -28,6 +28,26 @@ jobs:
         with:
           context: .
           push: true
+          platforms: linux/amd64
           tags: |
             ghcr.io/vsnp-it-msk/vsnp-pomosh-max:latest
             ghcr.io/vsnp-it-msk/vsnp-pomosh-max:${{ github.sha }}
+
+      - name: Log in to Cloud.ru Artifact Registry
+        if: ${{ secrets.CLOUD_REGISTRY_HOST != '' && secrets.CLOUD_REGISTRY_KEY_ID != '' && secrets.CLOUD_REGISTRY_KEY_SECRET != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.CLOUD_REGISTRY_HOST }}
+          username: ${{ secrets.CLOUD_REGISTRY_KEY_ID }}
+          password: ${{ secrets.CLOUD_REGISTRY_KEY_SECRET }}
+
+      - name: Push image to Cloud.ru Artifact Registry
+        if: ${{ secrets.CLOUD_REGISTRY_HOST != '' && secrets.CLOUD_REGISTRY_KEY_ID != '' && secrets.CLOUD_REGISTRY_KEY_SECRET != '' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ secrets.CLOUD_REGISTRY_HOST }}/vsnp-pomosh-max:latest
+            ${{ secrets.CLOUD_REGISTRY_HOST }}/vsnp-pomosh-max:${{ github.sha }}

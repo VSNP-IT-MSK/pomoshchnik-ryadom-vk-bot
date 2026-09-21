@@ -23,11 +23,12 @@ REQUIRED_HASHTAGS="#ВСНП_МОСКВА #Наставничество #Про�
 
 ## Вариант через интерфейс Cloud.ru
 
-1. После push в `main` дождитесь workflow **Publish Cloud.ru image** в GitHub Actions. Он публикует образ `ghcr.io/vsnp-it-msk/vsnp-pomosh-max:latest`. Для загрузки без отдельного токена сделайте пакет GHCR публичным в настройках Packages; если политика организации запрещает публичный пакет, создайте read-only токен и добавьте registry credentials в Cloud.ru.
-2. В Cloud.ru откройте Container Apps / Container Services и нажмите **Создать**. В поле URI образа укажите `ghcr.io/vsnp-it-msk/vsnp-pomosh-max:latest`.
-3. Укажите порт контейнера `3000`, включите публичный адрес, минимальное число экземпляров `0`, максимальное `1`. Для Webhook приложение должно быть доступно постоянно; если масштабирование до нуля приводит к пропуску событий, установите минимум `1` и проверьте доступный бесплатный лимит.
-4. Добавьте переменные из списка выше и создайте ревизию.
-5. Откройте выданный Cloud.ru URL и проверьте `GET /health`. Ожидается JSON с `"transport":"max"`.
+1. Создайте Docker-реестр в Artifact Registry, например `vsnp-pomosh`. После создания его URI будет `vsnp-pomosh.cr.cloud.ru`.
+2. Добавьте в GitHub repository secrets `CLOUD_REGISTRY_HOST` (значение `vsnp-pomosh.cr.cloud.ru`), `CLOUD_REGISTRY_KEY_ID` и `CLOUD_REGISTRY_KEY_SECRET`. Workflow **Publish Cloud.ru image** соберёт образ для `linux/amd64` и опубликует `vsnp-pomosh.cr.cloud.ru/vsnp-pomosh-max:latest`. GHCR-публикация остаётся как резервная.
+3. В Cloud.ru откройте Container Apps / Container Services и нажмите **Создать**. В поле URI образа укажите `vsnp-pomosh.cr.cloud.ru/vsnp-pomosh-max:latest`.
+4. Укажите порт контейнера `3000`, включите публичный адрес, минимальное число экземпляров `0`, максимальное `1`. Для Webhook приложение должно быть доступно постоянно; если масштабирование до нуля приводит к пропуску событий, установите минимум `1` и проверьте доступный бесплатный лимит.
+5. Добавьте переменные из списка выше и создайте ревизию.
+6. Откройте выданный Cloud.ru URL и проверьте `GET /health`. Ожидается JSON с `"transport":"max"`.
 
 ## Подписка MAX Webhook
 
