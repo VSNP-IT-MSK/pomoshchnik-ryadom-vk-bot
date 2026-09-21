@@ -306,7 +306,7 @@ async function extractPhoto(message) {
       fallback = result;
       if (bytes.byteLength <= MAX_VISION_IMAGE_BYTES) return result;
     } catch {
-      // Try a smaller VK size if the largest URL has expired or is unavailable.
+      // Try a smaller image URL if the largest one has expired or is unavailable.
     }
   }
   if (fallback) return fallback;
@@ -451,91 +451,11 @@ async function openAI(path, body, env) {
 }
 
 async function uploadMessagePhoto(bytes, peerId, env) {
-  if (env.MAX_BOT_TOKEN) return uploadMaxImage(bytes, env);
-  const mime = detectImageMime(bytes);
-  if (mime === "image/webp") {
-    throw new Error("VK принимает PNG, JPEG или GIF; сервис изображений вернул WebP");
-  }
-  if (!["image/png", "image/jpeg", "image/gif"].includes(mime)) {
-    throw new Error(`неподдерживаемый формат изображения: ${mime}`);
-  }
-  const extension = mime === "image/jpeg" ? "jpg" : mime === "image/gif" ? "gif" : "png";
-  let lastUpload = null;
-
-  // VK has occasionally returned a transient v2/bulk_upload response instead of
-  // the documented { photo, server, hash } payload. Refresh the upload server
-  // once, then fail with enough context to diagnose a persistent rollout issue.
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const server = await vk("photos.getMessagesUploadServer", { peer_id: peerId }, env);
-    if (!server?.upload_url) {
-      throw new Error("VK не вернул URL сервера загрузки изображения");
-    }
-
-    let uploadResponse;
-    try {
-      const multipart = buildPhotoMultipart(bytes, mime, `pomoshchnik-post.${extension}`);
-      uploadResponse = await fetchWithRetry(server.upload_url, {
-        method: "POST",
-        headers: multipart.headers,
-        body: multipart.body
-      }, { attempts: 2, timeoutMs: 30000 });
-    } catch (error) {
-      if (attempt === 0) {
-        console.warn("VK photo upload network retry", { code: error?.code || error?.cause?.code || error?.name });
-        continue;
-      }
-      throw error;
-    }
-    const uploadText = await uploadResponse.text();
-    let upload = {};
-    try {
-      upload = uploadText ? JSON.parse(uploadText) : {};
-    } catch {
-      upload = { _raw: uploadText.slice(0, 200) };
-    }
-    const normalizedUpload = unwrapUploadResponse(upload);
-    lastUpload = { upload: normalizedUpload, uploadUrl: server.upload_url, status: uploadResponse.status };
-
-    if (!uploadResponse.ok) {
-      throw new Error(`VK загрузка изображения ${uploadResponse.status}: ${formatUploadError(normalizedUpload)}`);
-    }
-    const photoPayload = normalizeUploadPhoto(normalizedUpload.photo);
-    if (photoPayload) {
-      const saved = await vk("photos.saveMessagesPhoto", {
-        photo: photoPayload,
-        server: normalizedUpload.server,
-        hash: normalizedUpload.hash
-      }, env);
-      const photo = saved?.[0];
-      if (!photo) throw new Error("VK не сохранил изображение для сообщения");
-      const accessKey = photo.access_key ? `_${photo.access_key}` : "";
-      return `photo${photo.owner_id}_${photo.id}${accessKey}`;
-    }
-
-    const isBulkUpload = /\/v2\/bulk_upload(?:[/?]|$)/i.test(String(server.upload_url)) || normalizedUpload.files;
-    if (isBulkUpload && attempt === 0) {
-      console.warn("VK returned a bulk upload response; refreshing the message upload server", {
-        path: safeUrlPath(server.upload_url),
-        keys: Object.keys(normalizedUpload).filter((key) => key !== "_raw")
-      });
-      continue;
-    }
-    break;
-  }
-
-  throw new Error(`VK не вернул поле photo для сообщения (${describeUploadResponse(lastUpload)})`);
+  return uploadMaxImage(bytes, env);
 }
 
 async function sendMessage(peerId, message, env, attachment = "") {
-  if (env.MAX_BOT_TOKEN) return sendMaxMessage(peerId, message, env, attachment);
-  const params = {
-    peer_id: peerId,
-    random_id: Math.floor(Math.random() * 2_000_000_000),
-    message,
-    keyboard: JSON.stringify(VK_KEYBOARD)
-  };
-  if (attachment) params.attachment = attachment;
-  return vk("messages.send", params, env);
+  return sendMaxMessage(peerId, message, env, attachment);
 }
 
 async function sendMaxMessage(peerId, message, env, attachment = null) {
