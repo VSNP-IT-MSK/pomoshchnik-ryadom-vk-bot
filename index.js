@@ -33,17 +33,6 @@ const MAX_KEYBOARD = {
   }
 };
 
-const VK_KEYBOARD = {
-  one_time: false,
-  buttons: [
-    [
-      { action: { type: "text", label: BUTTON.START, payload: JSON.stringify({ action: "start" }) }, color: "primary" },
-      { action: { type: "text", label: BUTTON.HELP, payload: JSON.stringify({ action: "help" }) }, color: "secondary" },
-      { action: { type: "text", label: BUTTON.CANCEL, payload: JSON.stringify({ action: "cancel" }) }, color: "negative" }
-    ]
-  ]
-};
-
 // Cloud.ru container runs one Node process. Keep the short-lived two-message draft in memory.
 const pendingDrafts = new Map();
 const seenMaxEvents = new Map();
@@ -520,20 +509,6 @@ async function maxApi(path, init = {}, env) {
   return data;
 }
 
-async function vk(method, params, env, accessToken = env.VK_GROUP_TOKEN) {
-  if (!accessToken) throw new Error("VK-токен не задан");
-  const body = new URLSearchParams({ ...params, access_token: accessToken, v: env.VK_API_VERSION || "5.199" });
-  const response = await fetchWithRetry(`https://api.vk.com/method/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body
-  }, { attempts: 3, timeoutMs: 20000 });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`VK HTTP ${response.status}`);
-  if (data.error) throw new Error(data.error.error_msg || `VK API ${data.error.error_code}`);
-  return data.response;
-}
-
 async function fetchWithRetry(url, init = {}, options = {}) {
   const attempts = Math.max(1, Number(options.attempts) || 1);
   const timeoutMs = Math.max(1000, Number(options.timeoutMs) || 30000);
@@ -572,16 +547,7 @@ async function fetchWithRetry(url, init = {}, options = {}) {
 }
 
 function retryTargets(value) {
-  const url = new URL(value);
-  if (url.hostname === "api.vk.com" || url.hostname === "api.vk.ru") {
-    const hosts = [url.hostname, url.hostname === "api.vk.com" ? "api.vk.ru" : "api.vk.com"];
-    return hosts.map((host) => {
-      const copy = new URL(url);
-      copy.hostname = host;
-      return copy.toString();
-    });
-  }
-  return [url.toString()];
+  return [new URL(value).toString()];
 }
 
 function isRetryableStatus(status) {
@@ -654,20 +620,6 @@ function normalizeHashtags(value, env = {}) {
   return hashtags;
 }
 
-function bytesToDataUrl(bytes, mime = "image/jpeg") {
-  return `data:${imageMime(mime, "")};base64,${bytesToBase64(bytes)}`;
-}
-
-function bytesToBase64(bytes) {
-  if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("base64");
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return btoa(binary);
-}
-
 function detectImageMime(bytes) {
   if (bytes?.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
   if (bytes?.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
@@ -678,29 +630,6 @@ function detectImageMime(bytes) {
   return "image/png";
 }
 
-function safeUrlPath(value) {
-  try { return new URL(value).pathname; } catch { return "unknown"; }
-}
-
-function buildPhotoMultipart(bytes, mime, filename) {
-  const boundary = `----pomoshchnik-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const header = Buffer.from(
-    `--${boundary}\r\n` +
-    `Content-Disposition: form-data; name="photo"; filename="${filename}"\r\n` +
-    `Content-Type: ${mime}\r\n\r\n`,
-    "utf8"
-  );
-  const footer = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
-  const body = Buffer.concat([header, Buffer.from(bytes), footer]);
-  return {
-    body,
-    headers: {
-      "content-type": `multipart/form-data; boundary=${boundary}`,
-      "content-length": String(body.length)
-    }
-  };
-}
-
 function formatUploadError(upload) {
   const error = upload?.error;
   if (typeof error === "string" && error) return error;
@@ -708,34 +637,4 @@ function formatUploadError(upload) {
   if (error?.error_msg) return String(error.error_msg);
   if (upload?._raw) return "сервер вернул не-JSON ответ";
   return "неизвестный ответ сервера загрузки";
-}
-
-function unwrapUploadResponse(upload) {
-  if (upload?.response && typeof upload.response === "object" && !Array.isArray(upload.response)) {
-    return upload.response;
-  }
-  return upload || {};
-}
-
-function normalizeUploadPhoto(value) {
-  if (value === undefined || value === null) return "";
-  if (typeof value === "string") return value.trim();
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  try { return JSON.stringify(value); } catch { return ""; }
-}
-
-function describeUploadResponse(result) {
-  if (!result) return "ответ отсутствует";
-  const keys = Object.keys(result.upload || {}).filter((key) => key !== "_raw");
-  const endpoint = safeUrlPath(result.uploadUrl);
-  const suffix = keys.length ? `поля: ${keys.join(", ")}` : "поля отсутствуют";
-  const status = result.status ? `HTTP ${result.status}, ` : "";
-  return `${status}endpoint ${endpoint}, ${suffix}`;
-}
-
-function base64ToBytes(base64) {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
 }
