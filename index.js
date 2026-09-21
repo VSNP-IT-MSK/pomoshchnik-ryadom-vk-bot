@@ -13,11 +13,25 @@ const BRAND_STYLE = `
 поддержки и роста. Оставляй свободную область сверху или слева для заголовка.
 Не добавляй читаемый текст, водяные знаки и чужие логотипы.`.trim();
 
+const BOT_DISPLAY_NAME = "ВСНП помощь";
+const DEFAULT_REQUIRED_HASHTAGS = ["#ВСНП_МОСКВА", "#Наставничество", "#Просвещение", "#Москва"];
+
 const BUTTON = Object.freeze({
   START: "Новый пост",
   HELP: "Помощь",
   CANCEL: "Отмена"
 });
+
+const MAX_KEYBOARD = {
+  type: "inline_keyboard",
+  payload: {
+    buttons: [[
+      { type: "callback", text: BUTTON.START, payload: "start" },
+      { type: "callback", text: BUTTON.HELP, payload: "help" },
+      { type: "callback", text: BUTTON.CANCEL, payload: "cancel" }
+    ]]
+  }
+};
 
 const VK_KEYBOARD = {
   one_time: false,
@@ -30,8 +44,9 @@ const VK_KEYBOARD = {
   ]
 };
 
-// Render free runs one Node process. Keep the short-lived two-message draft in memory.
+// Cloud.ru container runs one Node process. Keep the short-lived two-message draft in memory.
 const pendingDrafts = new Map();
+const seenMaxEvents = new Map();
 
 function draftKey(peerId, fromId) {
   return `${peerId}:${fromId}`;
@@ -42,11 +57,11 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/health") {
-      return new Response(JSON.stringify({ ok: true, service: "vsnp-vk-bot" }), { headers: JSON_HEADERS });
+      return new Response(JSON.stringify({ ok: true, service: "vsnp-pomosh-max-bot", bot_name: BOT_DISPLAY_NAME, transport: "max" }), { headers: JSON_HEADERS });
     }
 
     if (request.method === "GET" && url.pathname === "/") {
-      return new Response("Помощник рядом bot is running", { headers: { "content-type": "text/plain; charset=utf-8" } });
+      return new Response(`${BOT_DISPLAY_NAME} bot is running`, { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
 
     if (request.method === "POST" && url.pathname === "/cron/daily") {
@@ -62,39 +77,104 @@ export default {
       return new Response("invalid json", { status: 400 });
     }
 
-    if (env.VK_GROUP_ID && payload.group_id && String(payload.group_id) !== String(env.VK_GROUP_ID)) {
+    const webhookSecret = request.headers.get("x-max-bot-api-secret");
+    if (env.MAX_WEBHOOK_SECRET && webhookSecret !== env.MAX_WEBHOOK_SECRET) {
       return new Response("forbidden", { status: 403 });
     }
 
-    if (payload.type === "confirmation") {
-      // VK's confirmation request contains only type and group_id.
-      return new Response(env.VK_CONFIRMATION_CODE || "", { headers: { "content-type": "text/plain; charset=utf-8" } });
-    }
-
-    if (env.VK_CALLBACK_SECRET && payload.secret !== env.VK_CALLBACK_SECRET) {
-      return new Response("forbidden", { status: 403 });
-    }
-
-    // VK can retry a callback. KV is optional; when configured it prevents duplicate posts.
-    if (payload.event_id && env.EVENTS) {
-      const seen = await env.EVENTS.get(`event:${payload.event_id}`);
-      if (seen) return new Response("ok");
-      ctx.waitUntil(env.EVENTS.put(`event:${payload.event_id}`, "1", { expirationTtl: 86400 }));
-    }
-
-    if (payload.type === "message_new") {
-      ctx.waitUntil(Promise.resolve(handleMessage(payload, env))
-        .catch((error) => console.error("message_new failed", error)));
+    const updateType = String(payload.update_type || payload.type || "");
+    if (updateType === "message_created" || updateType === "message_callback") {
+      const eventId = payload.update_id || payload.event_id || payload.callback?.callback_id;
+      if (eventId && rememberMaxEvent(eventId)) return new Response("ok");
+      const normalized = normalizeMaxUpdate(payload);
+      if (normalized) {
+        ctx.waitUntil(Promise.resolve(handleMessage(normalized, env))
+          .catch((error) => console.error(`${updateType} failed`, error)));
+      }
     }
 
     return new Response("ok", { headers: { "content-type": "text/plain; charset=utf-8" } });
   }
 };
 
+function rememberMaxEvent(eventId) {
+  const key = String(eventId);
+  const now = Date.now();
+  for (const [oldKey, timestamp] of seenMaxEvents) {
+    if (now - timestamp > 24 * 60 * 60 * 1000) seenMaxEvents.delete(oldKey);
+  }
+  if (seenMaxEvents.has(key)) return true;
+  seenMaxEvents.set(key, now);
+  return false;
+}
+
+function normalizeMaxUpdate(update) {
+  const callback = update.callback || update.message_callback || {};
+  const source = update.message || callback.message || {};
+  const body = source.body || source;
+  const sender = source.sender || callback.user || {};
+  const recipient = source.recipient || {};
+  const chatId = recipient.chat_id ?? source.chat_id ?? callback.chat_id ?? update.chat_id;
+  const userId = recipient.user_id ?? source.user_id ?? callback.user?.user_id ?? callback.user_id;
+  const peerId = chatId !== undefined && chatId !== null
+    ? `chat:${chatId}`
+    : userId !== undefined && userId !== null
+      ? `user:${userId}`
+      : "";
+  if (!peerId) return null;
+
+  const attachments = normalizeMaxAttachments(body.attachments || source.attachments);
+  const callbackPayload = callback.payload ?? callback.callback_data ?? body.payload ?? source.payload;
+  return {
+    message: {
+      peer_id: peerId,
+      from_id: sender.user_id ?? callback.user?.user_id ?? userId ?? peerId,
+      text: String(body.text ?? source.text ?? "").trim(),
+      payload: callbackPayload,
+      attachments
+    }
+  };
+}
+
+function normalizeMaxAttachments(value) {
+  const attachments = normalizeAttachments(value);
+  return attachments.map((attachment) => {
+    const type = String(attachment?.type || "").toLowerCase();
+    if (type !== "image" && type !== "photo") return attachment;
+    const payload = attachment.payload || attachment;
+    const candidates = collectImageUrls(payload);
+    return {
+      type: "photo",
+      photo: {
+        sizes: candidates.map((url, index) => ({ url, width: index + 1 }))
+      }
+    };
+  });
+}
+
+function collectImageUrls(value) {
+  const urls = [];
+  const seen = new Set();
+  const visit = (item, key = "") => {
+    if (!item) return;
+    if (typeof item === "string") {
+      if (/^https?:\/\//i.test(item) && (!key || /url|image|photo|preview|download|src/i.test(key))) {
+        if (!seen.has(item)) { seen.add(item); urls.push(item); }
+      }
+      return;
+    }
+    if (Array.isArray(item)) { item.forEach((entry) => visit(entry, key)); return; }
+    if (typeof item !== "object") return;
+    for (const [childKey, childValue] of Object.entries(item)) visit(childValue, childKey);
+  };
+  visit(value);
+  return urls;
+}
+
 async function handleMessage(payload, env) {
-  const message = payload.object?.message || payload.object || {};
-  const peerId = Number(message.peer_id || message.from_id);
-  const fromId = Number(message.from_id || peerId);
+  const message = payload.object?.message || payload.object || payload.message || {};
+  const peerId = message.peer_id || message.chat_id || message.user_id || message.from_id;
+  const fromId = message.from_id || peerId;
   const text = String(message.text || "").trim();
   if (!peerId) return;
   const key = draftKey(peerId, fromId);
@@ -160,8 +240,12 @@ async function handleMessage(payload, env) {
 
 function getButtonAction(message) {
   try {
-    const payload = typeof message.payload === "string" ? JSON.parse(message.payload) : message.payload;
-    return payload?.action || null;
+    const raw = message.payload;
+    const payload = typeof raw === "string" ? (() => {
+      try { return JSON.parse(raw); } catch { return raw; }
+    })() : raw;
+    if (typeof payload === "string") return payload;
+    return payload?.action || payload?.command || null;
   } catch {
     return null;
   }
@@ -226,7 +310,7 @@ async function extractPhoto(message) {
     }
   }
   if (fallback) return fallback;
-  throw new Error("не удалось скачать фотографию из VK");
+  throw new Error("не удалось скачать фотографию из MAX");
 }
 
 function normalizeAttachments(value) {
@@ -253,6 +337,7 @@ async function improveDraft(draft, peerId, env) {
   }
 
   const communityName = "ВСНП_МОСКВА";
+  const mandatoryHashtags = normalizeHashtags([], env).join(" ");
   const prompt = `Подготовь готовый пост для группы «${communityName}» по исходному тексту пользователя. Фотография ` +
     `будет оформлена отдельно локальным слоем брендинга.\n\n` +
     `Исходный текст пользователя:\n---\n${draft.text}\n---\n\n` +
@@ -272,7 +357,7 @@ async function improveDraft(draft, peerId, env) {
     `если они поддерживают исходный тон.\n\n` +
     `Сделай заголовок длиной примерно 5–10 слов, затем 2–5 коротких абзацев и один мягкий призыв к диалогу ` +
     `или действию. Не начинай каждый абзац одинаково и не повторяй заголовок в тексте.\n\n` +
-    `Хэштеги: сохрани хэштеги пользователя и названия проектов в их исходном написании, включая подчёркивания ` +
+    `Хэштеги: обязательно добавь в конец поста следующие теги: ${mandatoryHashtags}. Сохрани хэштеги пользователя и названия проектов в их исходном написании, включая подчёркивания ` +
     `(например, #Почитаем_2026). Если исходных хэштегов нет, добавь 2–4 точных тематических тега про наставничество, ` +
     `просвещение, образование, событие или Москву. Не используй рекламный спам, общие теги вроде #успех и не ` +
     `придумывай название проекта.\n\n` +
@@ -310,7 +395,7 @@ async function improveDraft(draft, peerId, env) {
     title: String(parsed.title).trim(),
     text: String(parsed.text).trim(),
     image_prompt: `${String(parsed.image_prompt).trim()}. ${BRAND_STYLE}`,
-    hashtags: normalizeHashtags(parsed.hashtags)
+    hashtags: normalizeHashtags(parsed.hashtags, env)
   };
   const imageBytes = await applyBrandDesign(draft.photo.bytes);
   post.attachment = await uploadMessagePhoto(imageBytes, peerId, env);
@@ -327,7 +412,8 @@ async function applyBrandDesign(bytes) {
   const width = metadata.width || 1600;
   const height = metadata.height || 1600;
   const margin = Math.max(18, Math.round(width * 0.025));
-  const logoWidth = Math.max(120, Math.round(width * 0.2));
+  const maxLogoWidth = Math.max(32, width - margin * 2);
+  const logoWidth = Math.min(maxLogoWidth, Math.max(96, Math.round(width * 0.2)));
   const logo = await sharp(BRAND_LOGO_PATH)
     .resize({ width: logoWidth, fit: "inside", withoutEnlargement: false })
     .png()
@@ -365,6 +451,7 @@ async function openAI(path, body, env) {
 }
 
 async function uploadMessagePhoto(bytes, peerId, env) {
+  if (env.MAX_BOT_TOKEN) return uploadMaxImage(bytes, env);
   const mime = detectImageMime(bytes);
   if (mime === "image/webp") {
     throw new Error("VK принимает PNG, JPEG или GIF; сервис изображений вернул WebP");
@@ -440,6 +527,7 @@ async function uploadMessagePhoto(bytes, peerId, env) {
 }
 
 async function sendMessage(peerId, message, env, attachment = "") {
+  if (env.MAX_BOT_TOKEN) return sendMaxMessage(peerId, message, env, attachment);
   const params = {
     peer_id: peerId,
     random_id: Math.floor(Math.random() * 2_000_000_000),
@@ -448,6 +536,68 @@ async function sendMessage(peerId, message, env, attachment = "") {
   };
   if (attachment) params.attachment = attachment;
   return vk("messages.send", params, env);
+}
+
+async function sendMaxMessage(peerId, message, env, attachment = null) {
+  const target = parseMaxTarget(peerId);
+  if (!target.id) throw new Error("MAX не определил получателя сообщения");
+  const queryName = target.type === "user" ? "user_id" : "chat_id";
+  const attachments = [];
+  if (attachment) attachments.push(attachment);
+  attachments.push(MAX_KEYBOARD);
+  return maxApi(`/messages?${queryName}=${encodeURIComponent(target.id)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: String(message).slice(0, 4000), attachments })
+  }, env);
+}
+
+function parseMaxTarget(value) {
+  const raw = String(value || "");
+  const match = raw.match(/^(chat|user):(.+)$/);
+  if (match) return { type: match[1], id: match[2] };
+  return { type: "chat", id: raw };
+}
+
+async function uploadMaxImage(bytes, env) {
+  const mime = detectImageMime(bytes);
+  if (!["image/png", "image/jpeg", "image/gif"].includes(mime)) {
+    throw new Error(`MAX не принимает изображение формата ${mime}`);
+  }
+
+  const init = await maxApi("/uploads?type=image", { method: "POST" }, env);
+  const uploadUrl = init?.url;
+  if (!uploadUrl) throw new Error("MAX не вернул URL загрузки изображения");
+
+  const form = new FormData();
+  form.append("data", new Blob([Buffer.from(bytes)], { type: mime }), "pomoshchnik-post.jpg");
+  const uploaded = await fetchWithRetry(uploadUrl, {
+    method: "POST",
+    headers: { authorization: env.MAX_BOT_TOKEN },
+    body: form
+  }, { attempts: 1, timeoutMs: 60000 });
+  const result = await uploaded.json().catch(() => ({}));
+  if (!uploaded.ok) throw new Error(`MAX загрузка изображения ${uploaded.status}: ${formatUploadError(result)}`);
+  const token = result.token || result.payload?.token || result.image?.token;
+  if (!token) throw new Error("MAX не вернул токен загруженного изображения");
+  return { type: "image", payload: { token } };
+}
+
+async function maxApi(path, init = {}, env) {
+  if (!env.MAX_BOT_TOKEN) throw new Error("MAX_BOT_TOKEN не задан");
+  const base = (env.MAX_API_BASE_URL || "https://platform-api2.max.ru").replace(/\/$/, "");
+  const headers = new Headers(init.headers || {});
+  headers.set("authorization", env.MAX_BOT_TOKEN);
+  if (init.body && !headers.has("content-type") && !(init.body instanceof FormData)) {
+    headers.set("content-type", "application/json");
+  }
+  const response = await fetchWithRetry(`${base}${path}`, { ...init, headers }, { attempts: 3, timeoutMs: 30000 });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = data.message || data.error || data.error_description || `HTTP ${response.status}`;
+    throw new Error(`MAX API: ${detail}`);
+  }
+  return data;
 }
 
 async function vk(method, params, env, accessToken = env.VK_GROUP_TOKEN) {
@@ -557,21 +707,31 @@ function messageContentToText(content) {
   return content?.text || content?.content || "";
 }
 
-function normalizeHashtags(value) {
+function normalizeHashtags(value, env = {}) {
   const source = Array.isArray(value)
     ? value
     : typeof value === "string"
       ? value.split(/[\s,]+/)
       : [];
   const hashtags = [];
+  const required = String(env.REQUIRED_HASHTAGS || "")
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const mandatory = required.length ? required : DEFAULT_REQUIRED_HASHTAGS;
   for (const item of source) {
     const tag = String(item || "").trim().replace(/^#+/, "");
     if (!tag) continue;
     const normalized = `#${tag.replace(/[^\p{L}\p{N}_-]/gu, "")}`;
     if (normalized.length > 1 && !hashtags.includes(normalized)) hashtags.push(normalized);
-    if (hashtags.length >= 6) break;
+    if (hashtags.length >= 8) break;
   }
-  return hashtags.length ? hashtags : ["#Наставники", "#Просвещение", "#Москва"];
+  for (const item of mandatory) {
+    const tag = String(item).trim().replace(/^#+/, "");
+    const normalized = `#${tag.replace(/[^\p{L}\p{N}_-]/gu, "")}`;
+    if (normalized.length > 1 && !hashtags.includes(normalized)) hashtags.push(normalized);
+  }
+  return hashtags;
 }
 
 function bytesToDataUrl(bytes, mime = "image/jpeg") {

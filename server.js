@@ -36,4 +36,4 @@ const server = http.createServer(async (req, res) => {
 });
 
 const port = Number(process.env.PORT || 3000);
-server.listen(port, "0.0.0.0", () => console.log(`VSNP bot listening on ${port}`));
+server.listen(port, "0.0.0.0", () => console.log(`MAX bot listening on ${port}`));
