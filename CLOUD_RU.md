@@ -23,8 +23,8 @@ REQUIRED_HASHTAGS="#ВСНП_МОСКВА #Наставничество #Про�
 
 ## Вариант через интерфейс Cloud.ru
 
-1. Создайте репозиторий в Artifact Registry и соберите Docker-образ из этого репозитория. Если сборка из Git недоступна, локально выполните `docker build -t <registry>.cr.cloud.ru/pomoshchnik-ryadom:latest .`, войдите в реестр и выполните `docker push`.
-2. В Artifact Registry откройте меню образа и выберите **Создать Container App**.
+1. После push в `main` дождитесь workflow **Publish Cloud.ru image** в GitHub Actions. Он публикует образ `ghcr.io/vsnp-it-msk/vsnp-pomosh-max:latest`. Для загрузки без отдельного токена сделайте пакет GHCR публичным в настройках Packages; если политика организации запрещает публичный пакет, создайте read-only токен и добавьте registry credentials в Cloud.ru.
+2. В Cloud.ru откройте Container Apps / Container Services и нажмите **Создать**. В поле URI образа укажите `ghcr.io/vsnp-it-msk/vsnp-pomosh-max:latest`.
 3. Укажите порт контейнера `3000`, включите публичный адрес, минимальное число экземпляров `0`, максимальное `1`. Для Webhook приложение должно быть доступно постоянно; если масштабирование до нуля приводит к пропуску событий, установите минимум `1` и проверьте доступный бесплатный лимит.
 4. Добавьте переменные из списка выше и создайте ревизию.
 5. Откройте выданный Cloud.ru URL и проверьте `GET /health`. Ожидается JSON с `"transport":"max"`.

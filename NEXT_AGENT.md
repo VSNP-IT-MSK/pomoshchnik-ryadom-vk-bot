@@ -9,6 +9,7 @@
 - Отправка текста и изображений переведена на `platform-api2.max.ru`.
 - Исправлен баг `sharp` на маленьких фото: логотип ограничивается размерами исходника.
 - Добавлены `Dockerfile`, `.dockerignore`, `CLOUD_RU.md` и переменные MAX.
+- Добавлен GitHub Actions workflow `.github/workflows/publish-image.yml` для публикации образа в GHCR.
 - Имя бота в коде: «ВСНП помощь». Обязательные теги задаются через `REQUIRED_HASHTAGS`.
 
 ## Что осталось для боевого запуска
