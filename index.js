@@ -72,11 +72,14 @@ export default {
     }
 
     const updateType = String(payload.update_type || payload.type || "");
-    if (updateType === "message_created" || updateType === "message_callback") {
+    if (updateType === "message_created" || updateType === "message_callback" || updateType === "bot_started") {
       const eventId = payload.update_id || payload.event_id || payload.callback?.callback_id;
       if (eventId && rememberMaxEvent(eventId)) return new Response("ok");
       const normalized = normalizeMaxUpdate(payload);
       if (normalized) {
+        // MAX sends bot_started without a message body. Treat it as the
+        // built-in "Новый пост" action so a new dialog gets its keyboard.
+        if (updateType === "bot_started") normalized.message.text = BUTTON.START;
         ctx.waitUntil(Promise.resolve(handleMessage(normalized, env))
           .catch((error) => console.error(`${updateType} failed`, error)));
       }
@@ -101,10 +104,10 @@ function normalizeMaxUpdate(update) {
   const callback = update.callback || update.message_callback || {};
   const source = update.message || callback.message || {};
   const body = source.body || source;
-  const sender = source.sender || callback.user || {};
+  const sender = source.sender || callback.user || update.user || update.sender || {};
   const recipient = source.recipient || {};
   const chatId = recipient.chat_id ?? source.chat_id ?? callback.chat_id ?? update.chat_id;
-  const senderUserId = sender.user_id ?? callback.user?.user_id ?? callback.user_id ?? source.user_id ?? update.user_id;
+  const senderUserId = sender.user_id ?? callback.user?.user_id ?? callback.user_id ?? source.user_id ?? update.user_id ?? update.user?.user_id;
   const peerId = chatId !== undefined && chatId !== null
     ? `chat:${chatId}`
     : senderUserId !== undefined && senderUserId !== null
@@ -487,9 +490,25 @@ async function uploadMaxImage(bytes, env) {
   }, { attempts: 1, timeoutMs: 60000 });
   const result = await uploaded.json().catch(() => ({}));
   if (!uploaded.ok) throw new Error(`MAX загрузка изображения ${uploaded.status}: ${formatUploadError(result)}`);
-  const token = result.token || result.payload?.token || result.image?.token;
+  const token = findUploadedMediaToken(result);
   if (!token) throw new Error("MAX не вернул токен загруженного изображения");
   return { type: "image", payload: { token } };
+}
+
+function findUploadedMediaToken(result) {
+  if (!result || typeof result !== "object") return "";
+  if (typeof result.token === "string" && result.token) return result.token;
+
+  // MAX returns image uploads as { photos: { photoIds: { token } } }.
+  // Keep the fallback recursive so the parser also handles a dynamic photo id.
+  for (const [key, value] of Object.entries(result)) {
+    if (key === "token" && typeof value === "string" && value) return value;
+    if (value && typeof value === "object") {
+      const nested = findUploadedMediaToken(value);
+      if (nested) return nested;
+    }
+  }
+  return "";
 }
 
 async function maxApi(path, init = {}, env) {
