@@ -14,7 +14,7 @@ const BRAND_STYLE = `
 Не добавляй читаемый текст, водяные знаки и чужие логотипы.`.trim();
 
 const BOT_DISPLAY_NAME = "ВСНП помощь";
-const DEFAULT_REQUIRED_HASHTAGS = ["#ВСНП_МОСКВА", "#Наставничество", "#Просвещение", "#Москва"];
+const DEFAULT_REQUIRED_HASHTAGS = ["#ВСНП_МОСКВА"];
 
 const BUTTON = Object.freeze({
   START: "Новый пост",
@@ -388,10 +388,8 @@ async function improveDraft(draft, peerId, env) {
     `если они поддерживают исходный тон.\n\n` +
     `Сделай заголовок длиной примерно 5–10 слов, затем 2–5 коротких абзацев и один мягкий призыв к диалогу ` +
     `или действию. Не начинай каждый абзац одинаково и не повторяй заголовок в тексте.\n\n` +
-    `Хэштеги: обязательно добавь в конец поста следующие теги: ${mandatoryHashtags}. Сохрани хэштеги пользователя и названия проектов в их исходном написании, включая подчёркивания ` +
-    `(например, #Почитаем_2026). Если исходных хэштегов нет, добавь 2–4 точных тематических тега про наставничество, ` +
-    `просвещение, образование, событие или Москву. Не используй рекламный спам, общие теги вроде #успех и не ` +
-    `придумывай название проекта.\n\n` +
+    `Хэштеги: в конце поста поставь только этот обязательный тег: ${mandatoryHashtags}. Не добавляй другие ` +
+    `хэштеги и не сохраняй хэштеги из исходного текста.\n\n` +
     `Фото не нужно анализировать или пересоздавать: его обработает локальный слой брендинга. Опиши в image_prompt ` +
     `на английском только рекомендации по фирменному оформлению поверх исходника. ` +
     `Исходная фотография должна остаться узнаваемой: те же лица, люди, предметы, действие и композиция. ` +
@@ -449,15 +447,31 @@ async function applyBrandDesign(bytes) {
     .resize({ width: logoWidth, fit: "inside", withoutEnlargement: false })
     .png()
     .toBuffer();
-  const waveHeight = Math.round(height * 0.16);
-  const stroke = Math.max(4, Math.round(width * 0.006));
+  const waveHeight = Math.round(height * 0.2);
+  const stroke = Math.max(4, Math.round(width * 0.005));
   const overlay = Buffer.from(`<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
-    <path d="M0 ${height - waveHeight * 0.72} C ${width * 0.2} ${height - waveHeight * 1.2}, ${width * 0.36} ${height - waveHeight * 0.05}, ${width * 0.58} ${height - waveHeight * 0.62} S ${width * 0.86} ${height - waveHeight * 1.05}, ${width} ${height - waveHeight * 0.48} L ${width} ${height} L 0 ${height} Z" fill="#0C4746" fill-opacity="0.72"/>
-    <path d="M0 ${height - waveHeight * 0.3} C ${width * 0.2} ${height - waveHeight * 0.75}, ${width * 0.4} ${height + waveHeight * 0.05}, ${width * 0.63} ${height - waveHeight * 0.28} S ${width * 0.86} ${height - waveHeight * 0.7}, ${width} ${height - waveHeight * 0.18}" fill="none" stroke="#B88FFF" stroke-width="${stroke}" stroke-linecap="round" opacity="0.95"/>
-    <path d="M0 ${height - waveHeight * 0.08} C ${width * 0.24} ${height - waveHeight * 0.38}, ${width * 0.47} ${height + waveHeight * 0.08}, ${width * 0.75} ${height - waveHeight * 0.12} S ${width * 0.9} ${height - waveHeight * 0.34}, ${width} ${height - waveHeight * 0.1}" fill="none" stroke="#FFD21F" stroke-width="${Math.max(3, Math.round(stroke * 0.65))}" stroke-linecap="round" opacity="0.96"/>
-    <rect x="${margin - 8}" y="${margin - 8}" width="${logoWidth + 16}" height="${Math.round(logoWidth * 0.82) + 16}" rx="${Math.round(margin * 0.7)}" fill="#FFFFFF" fill-opacity="0.78"/>
-    <path d="M${width - margin * 2.5} ${margin * 1.2} C ${width - margin * 1.5} ${margin * 0.2}, ${width - margin * 0.5} ${margin * 1.9}, ${width - margin * 0.4} ${margin * 0.7}" fill="none" stroke="#7F74D8" stroke-width="${stroke}" stroke-linecap="round" opacity="0.9"/>
-    <path d="M${width - margin * 1.7} ${margin * 1.15} C ${width - margin * 1.2} ${margin * 0.55}, ${width - margin * 0.7} ${margin * 1.35}, ${width - margin * 0.2} ${margin * 0.95}" fill="none" stroke="#FFD21F" stroke-width="${Math.max(3, Math.round(stroke * 0.7))}" stroke-linecap="round" opacity="0.95"/>
+    <defs>
+      <linearGradient id="bottom" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#0C4746" stop-opacity="0.18"/>
+        <stop offset="1" stop-color="#0C4746" stop-opacity="0.82"/>
+      </linearGradient>
+      <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#B88FFF"/>
+        <stop offset="0.55" stop-color="#FFD21F"/>
+        <stop offset="1" stop-color="#B88FFF"/>
+      </linearGradient>
+      <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+        <feDropShadow dx="0" dy="${Math.max(2, Math.round(margin * 0.35))}" stdDeviation="${Math.max(2, Math.round(margin * 0.45))}" flood-color="#0C4746" flood-opacity="0.28"/>
+      </filter>
+    </defs>
+    <rect x="${Math.round(stroke / 2)}" y="${Math.round(stroke / 2)}" width="${width - stroke}" height="${height - stroke}" rx="${Math.round(margin * 0.45)}" fill="none" stroke="url(#edge)" stroke-width="${Math.max(2, Math.round(stroke * 0.52))}" opacity="0.78"/>
+    <path d="M0 ${height - waveHeight * 0.82} C ${width * 0.2} ${height - waveHeight * 1.4}, ${width * 0.38} ${height - waveHeight * 0.08}, ${width * 0.59} ${height - waveHeight * 0.7} S ${width * 0.86} ${height - waveHeight * 1.1}, ${width} ${height - waveHeight * 0.52} L ${width} ${height} L 0 ${height} Z" fill="url(#bottom)"/>
+    <path d="M0 ${height - waveHeight * 0.34} C ${width * 0.2} ${height - waveHeight * 0.82}, ${width * 0.4} ${height + waveHeight * 0.03}, ${width * 0.63} ${height - waveHeight * 0.32} S ${width * 0.86} ${height - waveHeight * 0.8}, ${width} ${height - waveHeight * 0.2}" fill="none" stroke="#B88FFF" stroke-width="${stroke}" stroke-linecap="round" opacity="0.96"/>
+    <path d="M0 ${height - waveHeight * 0.1} C ${width * 0.24} ${height - waveHeight * 0.46}, ${width * 0.48} ${height + waveHeight * 0.08}, ${width * 0.75} ${height - waveHeight * 0.13} S ${width * 0.9} ${height - waveHeight * 0.4}, ${width} ${height - waveHeight * 0.12}" fill="none" stroke="#FFD21F" stroke-width="${Math.max(3, Math.round(stroke * 0.72))}" stroke-linecap="round" opacity="0.98"/>
+    <rect x="${margin - 10}" y="${margin - 10}" width="${logoWidth + 20}" height="${Math.round(logoWidth * 0.82) + 20}" rx="${Math.round(margin * 0.8)}" fill="#FFFFFF" fill-opacity="0.9" stroke="#B88FFF" stroke-width="${Math.max(2, Math.round(stroke * 0.42))}" filter="url(#shadow)"/>
+    <path d="M${width - margin * 2.8} ${margin * 1.3} C ${width - margin * 1.9} ${margin * 0.15}, ${width - margin * 0.7} ${margin * 2.05}, ${width - margin * 0.45} ${margin * 0.55}" fill="none" stroke="#7F74D8" stroke-width="${stroke}" stroke-linecap="round" opacity="0.92"/>
+    <path d="M${width - margin * 1.95} ${margin * 1.2} C ${width - margin * 1.35} ${margin * 0.55}, ${width - margin * 0.65} ${margin * 1.5}, ${width - margin * 0.2} ${margin * 0.86}" fill="none" stroke="#FFD21F" stroke-width="${Math.max(3, Math.round(stroke * 0.7))}" stroke-linecap="round" opacity="0.98"/>
+    <path d="M${width - margin * 1.2} ${margin * 2.5} l ${margin * 0.32} ${margin * 0.7} l ${margin * 0.32} ${-margin * 0.7} l ${margin * 0.72} ${-margin * 0.18} l ${-margin * 0.72} ${-margin * 0.18} l ${-margin * 0.32} ${-margin * 0.7} l ${-margin * 0.32} ${margin * 0.7} l ${-margin * 0.72} ${margin * 0.18} l ${margin * 0.72} ${margin * 0.18} Z" fill="#FFD21F" opacity="0.94"/>
   </svg>`);
   return sharp(base)
     .composite([
@@ -652,24 +666,12 @@ function messageContentToText(content) {
 }
 
 function normalizeHashtags(value, env = {}) {
-  const source = Array.isArray(value)
-    ? value
-    : typeof value === "string"
-      ? value.split(/[\s,]+/)
-      : [];
-  const hashtags = [];
   const required = String(env.REQUIRED_HASHTAGS || "")
     .split(/[\s,]+/)
     .map((item) => item.trim())
     .filter(Boolean);
   const mandatory = required.length ? required : DEFAULT_REQUIRED_HASHTAGS;
-  for (const item of source) {
-    const tag = String(item || "").trim().replace(/^#+/, "");
-    if (!tag) continue;
-    const normalized = `#${tag.replace(/[^\p{L}\p{N}_-]/gu, "")}`;
-    if (normalized.length > 1 && !hashtags.includes(normalized)) hashtags.push(normalized);
-    if (hashtags.length >= 8) break;
-  }
+  const hashtags = [];
   for (const item of mandatory) {
     const tag = String(item).trim().replace(/^#+/, "");
     const normalized = `#${tag.replace(/[^\p{L}\p{N}_-]/gu, "")}`;

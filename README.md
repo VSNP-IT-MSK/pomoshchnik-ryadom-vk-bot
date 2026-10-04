@@ -27,7 +27,7 @@ TEXT_MODEL=gpt-5.6-luna
 MAX_BOT_TOKEN
 MAX_WEBHOOK_SECRET
 MAX_API_BASE_URL=https://platform-api2.max.ru
-REQUIRED_HASHTAGS="#ВСНП_МОСКВА #Наставничество #Просвещение #Москва"
+REQUIRED_HASHTAGS="#ВСНП_МОСКВА"
 ```
 
 Webhook MAX должен вести на `https://YOUR-CLOUD-DOMAIN/webhook/max`. Подписка включает `message_created`, `message_callback` и `bot_started`.
