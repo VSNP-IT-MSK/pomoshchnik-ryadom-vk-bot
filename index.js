@@ -442,18 +442,18 @@ async function applyBrandDesign(bytes) {
   const height = metadata.height || 1600;
   const margin = Math.max(18, Math.round(width * 0.025));
   const maxLogoWidth = Math.max(32, width - margin * 2);
-  const logoWidth = Math.min(maxLogoWidth, Math.max(96, Math.round(width * 0.2)));
+  const logoWidth = Math.min(maxLogoWidth, Math.max(96, Math.round(width * 0.15)));
   const logo = await sharp(BRAND_LOGO_PATH)
     .resize({ width: logoWidth, fit: "inside", withoutEnlargement: false })
     .png()
     .toBuffer();
-  const waveHeight = Math.round(height * 0.2);
+  const waveHeight = Math.round(height * 0.15);
   const stroke = Math.max(4, Math.round(width * 0.005));
   const overlay = Buffer.from(`<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <linearGradient id="bottom" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0" stop-color="#0C4746" stop-opacity="0.18"/>
-        <stop offset="1" stop-color="#0C4746" stop-opacity="0.82"/>
+        <stop offset="0" stop-color="#0C4746" stop-opacity="0.12"/>
+        <stop offset="1" stop-color="#0C4746" stop-opacity="0.62"/>
       </linearGradient>
       <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0">
         <stop offset="0" stop-color="#B88FFF"/>
