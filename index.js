@@ -93,7 +93,7 @@ export default {
       hasChat: payload.chat_id !== undefined && payload.chat_id !== null
     });
     if (isHandledUpdate) {
-      const eventId = payload.update_id || payload.event_id || payload.callback?.callback_id;
+      const eventId = maxEventKey(payload, updateType);
       if (eventId && rememberMaxEvent(eventId)) return new Response("ok");
       const normalized = normalizeMaxUpdate(payload);
       if (normalized) {
@@ -110,6 +110,22 @@ export default {
     return new Response("ok", { headers: { "content-type": "text/plain; charset=utf-8" } });
   }
 };
+
+function maxEventKey(payload, updateType) {
+  const explicit = payload.update_id || payload.event_id || payload.callback?.callback_id;
+  if (explicit !== undefined && explicit !== null && String(explicit)) return `${updateType}:${explicit}`;
+  // MAX message updates do not always include a top-level update_id. The
+  // message body mid is stable across webhook retries and is the safest
+  // de-duplication key for text and photo messages.
+  const message = payload.message || payload.callback?.message || payload.message_callback?.message;
+  const mid = message?.body?.mid || message?.mid;
+  if (mid) return `${updateType}:mid:${mid}`;
+  const userId = payload.user?.user_id || payload.sender?.user_id || payload.callback?.user?.user_id || payload.message?.sender?.user_id || "";
+  const chatId = payload.chat_id ?? payload.message?.recipient?.chat_id ?? payload.callback?.message?.recipient?.chat_id ?? "";
+  const timestamp = payload.timestamp ?? "";
+  if (timestamp && (userId || chatId)) return `${updateType}:event:${chatId}:${userId}:${timestamp}`;
+  return "";
+}
 
 function rememberMaxEvent(eventId) {
   const key = String(eventId);

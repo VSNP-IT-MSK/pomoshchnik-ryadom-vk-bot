@@ -24,10 +24,16 @@ const server = http.createServer(async (req, res) => {
     const request = new Request(`http://${req.headers.host || "localhost"}${req.url}`, init);
     const background = [];
     const response = await worker.fetch(request, env, { waitUntil: (promise) => background.push(Promise.resolve(promise)) });
+    // Cloud.ru may freeze a scale-to-zero container as soon as the HTTP
+    // response is written. A webhook handler that only uses waitUntil can
+    // therefore lose the MAX reply after returning `200 OK`. Keep this
+    // request alive until all work registered by the worker is complete.
+    // MAX allows up to 30 seconds for webhook acknowledgement; callers that
+    // need long image generation should keep at least one warm replica.
+    if (background.length) await Promise.allSettled(background);
     res.statusCode = response.status;
     response.headers.forEach((value, key) => res.setHeader(key, value));
     res.end(Buffer.from(await response.arrayBuffer()));
-    Promise.allSettled(background).catch(() => {});
   } catch (error) {
     console.error(error);
     res.statusCode = 500;
