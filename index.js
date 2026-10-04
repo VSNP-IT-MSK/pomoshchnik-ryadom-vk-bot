@@ -67,12 +67,32 @@ export default {
     }
 
     const webhookSecret = request.headers.get("x-max-bot-api-secret");
-    if (env.MAX_WEBHOOK_SECRET && webhookSecret !== env.MAX_WEBHOOK_SECRET) {
+    // MAX sends the secret in an HTTP header. Trim values entered through the
+    // Cloud.ru UI so an accidental trailing space does not reject every event.
+    if (env.MAX_WEBHOOK_SECRET && String(webhookSecret || "").trim() !== String(env.MAX_WEBHOOK_SECRET).trim()) {
+      console.warn("MAX webhook rejected: invalid secret", {
+        path: url.pathname,
+        hasSecret: Boolean(webhookSecret),
+        bodyBytes: JSON.stringify(payload).length
+      });
       return new Response("forbidden", { status: 403 });
     }
 
-    const updateType = String(payload.update_type || payload.type || "");
-    if (updateType === "message_created" || updateType === "message_callback" || updateType === "bot_started") {
+    const updateType = String(payload.update_type || payload.type || "").toLowerCase();
+    // Keep accepting message/callback envelopes even when MAX omits
+    // update_type (this has happened during API rollouts and makes the bot
+    // appear completely silent while the webhook itself is healthy).
+    const inferredMessageUpdate = Boolean(payload.message || payload.message_callback || payload.callback);
+    const isHandledUpdate = updateType === "message_created" || updateType === "message_callback" || updateType === "bot_started" || inferredMessageUpdate;
+    console.info("MAX webhook received", {
+      updateType: updateType || "(missing)",
+      inferredMessageUpdate,
+      hasMessage: Boolean(payload.message),
+      hasCallback: Boolean(payload.callback || payload.message_callback),
+      hasUser: Boolean(payload.user || payload.sender),
+      hasChat: payload.chat_id !== undefined && payload.chat_id !== null
+    });
+    if (isHandledUpdate) {
       const eventId = payload.update_id || payload.event_id || payload.callback?.callback_id;
       if (eventId && rememberMaxEvent(eventId)) return new Response("ok");
       const normalized = normalizeMaxUpdate(payload);
@@ -80,8 +100,10 @@ export default {
         // MAX sends bot_started without a message body. Treat it as the
         // built-in "Новый пост" action so a new dialog gets its keyboard.
         if (updateType === "bot_started") normalized.message.text = BUTTON.START;
-        ctx.waitUntil(Promise.resolve(handleMessage(normalized, env))
-          .catch((error) => console.error(`${updateType} failed`, error)));
+        const task = Promise.resolve(handleMessage(normalized, env))
+          .catch((error) => console.error(`${updateType || "message"} failed`, error));
+        if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(task);
+        else task.catch(() => {});
       }
     }
 
@@ -104,10 +126,11 @@ function normalizeMaxUpdate(update) {
   const callback = update.callback || update.message_callback || {};
   const source = update.message || callback.message || {};
   const body = source.body || source;
-  const sender = source.sender || callback.user || update.user || update.sender || {};
-  const recipient = source.recipient || {};
-  const chatId = recipient.chat_id ?? source.chat_id ?? callback.chat_id ?? update.chat_id;
-  const senderUserId = sender.user_id ?? callback.user?.user_id ?? callback.user_id ?? source.user_id ?? update.user_id ?? update.user?.user_id;
+  const sender = source.sender || callback.user || update.user || update.sender || update.from || {};
+  const recipient = source.recipient || update.recipient || {};
+  const chat = update.chat || source.chat || {};
+  const chatId = recipient.chat_id ?? source.chat_id ?? callback.chat_id ?? update.chat_id ?? chat.chat_id ?? chat.id;
+  const senderUserId = sender.user_id ?? sender.id ?? callback.user?.user_id ?? callback.user?.id ?? callback.user_id ?? source.user_id ?? update.user_id ?? update.user?.user_id ?? update.user?.id ?? update.sender?.user_id ?? update.from?.user_id;
   const peerId = chatId !== undefined && chatId !== null
     ? `chat:${chatId}`
     : senderUserId !== undefined && senderUserId !== null
